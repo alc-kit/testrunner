@@ -122,7 +122,8 @@ class StateView(dict):
 class Runner:
     def __init__(self, rc: RunnerConfig, reg: Registry, run_config: RunConfig, store: Store,
                  ui: InputBroker | None = None, echo: TextIO | None = None, color: str = "auto",
-                 run_id: str = "", readonly: bool = False):
+                 run_id: str = "", readonly: bool = False, report_formats: tuple[str, ...] = ()):
+        self.report_formats = report_formats      # empty: no report (only --report asks for one)
         self.run_id = run_id or uuid.uuid4().hex[:8]
         # A run of read-only steps takes no writer lock and persists no state: it may run
         # beside a state-changing run in the same directory.
@@ -236,11 +237,12 @@ class Runner:
                 self.say(self.style.dim(f"scenario released: the state reached {rw}"))
         await self.hook("run_end", run=run, result=result)
         self._summary(result)
-        try:   # a report is a convenience: it never changes a run's result
-            path = report.write(self.store, self.run_id)
-            self.say(self.style.dim(f"timing report: {path}"))
-        except Exception as e:  # noqa: BLE001
-            self.say(self.style.warn(f"no timing report: {e}"))
+        if self.report_formats:
+            try:   # a report never changes a run's result
+                for path in report.write(self.store, self.run_id, self.report_formats):
+                    self.say(self.style.dim(f"report: {path}"))
+            except Exception as e:  # noqa: BLE001
+                self.say(self.style.warn(f"no report: {e}"))
         return result
 
     async def _observe(self, var: str, scope: Scope) -> Any:

@@ -140,18 +140,28 @@ If no rule answers a prompt, it goes to the operator, or fails the step when nob
 attached (`--non-interactive`, CI). While a run is going you can type `status` or
 `abort`. Colour follows `--color auto|always|never`, `NO_COLOR` and `FORCE_COLOR`.
 
-## Timing reports
+## Reports
 
-Every run writes a self-contained HTML page to `<state_dir>/reports/`, and
-`reports/latest.html` always points at the newest. The page shows:
-- a timeline of the steps, coloured by outcome, with the outcome also written out;
-- each step's change against the median of its earlier passed runs (faster in blue,
-  slower in red);
-- a table with every number.
+A report is written only when you ask for one:
+```sh
+testrunner --report                       # run the plan, then write a markdown test report
+testrunner --report --report-format both  # markdown + a self-contained HTML timing page
+testrunner --report-of <run>|last         # (re)build the report of an earlier run
+```
+Reports go to `<state_dir>/reports/<started>-<run>.md|.html`; `latest.md` and
+`latest.html` always point at the newest.
 
-The page is built from the journal alone, so `testrunner --report [RUN]` rebuilds it for
-any past run. An action or a `step_end` hook can add its own numbers to the table with
-`step.metric("tasks", 779)`. They are recorded in the journal too.
+The **markdown** report has the result, a table of steps (outcome, start, duration, change
+against the median of earlier passed runs of the same step, metrics), and a Mermaid
+timeline. For every step that did not end as expected, it adds the detail and the last
+lines of that step's log, with colour codes stripped and NOLOG values already masked.
+
+The **HTML** page shows the same run as charts: a timeline coloured by outcome, and each
+step's change against earlier runs. It needs nothing external, so it opens offline.
+
+Both are built from the journal alone, so any past run can be reported afterwards. An
+action or a `step_end` hook can add its own numbers with `step.metric("tasks", 779)`;
+they are recorded in the journal and shown in both formats.
 
 ## NOLOG: values that must not be logged
 
@@ -177,7 +187,8 @@ does, so later runners can use them. It also records which values are NOLOG.
 testrunner                       run the run config's plan
 testrunner a..c d                run these steps (actions, paths, ranges), in order
 testrunner --plan [steps]        validate and print the walk; run nothing
-testrunner --list | --status | --scenario | --select -c NAME | --release | --report [RUN]
+testrunner --list | --status | --scenario | --select -c NAME | --release | --report-of RUN
+  --report  --report-format md|html|both
   -c/--config NAME   -w/--with key=value   --color MODE   --non-interactive   --root DIR
 ```
 Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).

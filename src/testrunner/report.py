@@ -1,9 +1,11 @@
-"""Timing reports: one self-contained HTML page per run, built from the journal alone.
+"""Run reports, built from the journal alone — written ONLY when asked (`--report`).
 
 Everything a report shows is already in the store's journal (step start/end, outcome,
-seconds, metrics), so a report can be (re)built for ANY past run — `--report [RUN]` —
-and every run writes its own at the end: <state>/reports/<started>-<run>.html, with
-reports/latest.html pointing at the newest.
+seconds, metrics), so a report can be (re)built for ANY past run (`--report-of RUN`).
+Formats: `md` (default) — a markdown test report: result, a step table, a mermaid
+timeline, and for every step that did not end as expected its detail and the tail of
+its log; `html` — the self-contained timing page described below. Written to
+<state>/reports/<started>-<run>.<ext>, with reports/latest.<ext> pointing at the newest.
 
 The page: headline numbers; a timeline (when each step ran, coloured by outcome, the
 outcome also written out); each step's change against the MEDIAN of earlier runs of
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import os
 import statistics
 from dataclasses import dataclass, field
@@ -51,11 +54,12 @@ class RunRecord:
 
     @property
     def seconds(self) -> float:
+        """Wall time; never less than the steps' own durations (coarse timestamps)."""
         last = self.end or (self.steps[-1].start if self.steps else self.start)
         if self.end is None and self.steps:
             s = self.steps[-1]
             last = datetime.fromtimestamp(s.start.timestamp() + s.seconds)
-        return (last - self.start).total_seconds()
+        return max((last - self.start).total_seconds(), sum(s.seconds for s in self.steps))
 
 
 def _t(e: dict) -> datetime:
@@ -333,19 +337,123 @@ th {{ color:var(--ink2); font-weight:600; }} td.num {{ text-align:right; font-va
 """
 
 
-def write(store: Store, run_id: str | None = None) -> Path:
-    runs = runs_from_journal(store)
-    page = render(runs, run_id)
-    run = next(r for r in runs if r.id == run_id) if run_id else runs[-1]
-    out = store.path("reports", f"{run.start:%Y%m%dT%H%M%SZ}-{run.id}.html")
-    atomic_write(out, page)
-    latest = out.parent / "latest.html"
+MD_ICON = {"good": "✅", "critical": "❌", "serious": "⚠️", "warning": "⚠️", "muted": "➖", "running": "⏳"}
+LOG_TAIL = 25          # lines of a failed step's log quoted in the markdown report
+
+
+def _md(text: Any) -> str:
+    """A table cell: no pipes, no newlines."""
+    return str(text).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _log_tail(store: Store, step_id: str) -> str:
+    from .term import strip
+    p = store.root / "logs" / f"{step_id}.log"
     try:
-        tmp = out.parent / ".latest.tmp"
+        data = strip(p.read_bytes()).decode(errors="replace").replace("\r", "")
+    except FileNotFoundError:
+        return ""
+    lines = [ln for ln in data.splitlines() if ln.strip()]
+    return "\n".join(lines[-LOG_TAIL:])
+
+
+def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Store | None = None) -> str:
+    idx = len(runs) - 1 if run_id is None else next((i for i, r in enumerate(runs) if r.id == run_id), None)
+    if idx is None:
+        raise ValueError(f"no run {run_id!r} in the journal")
+    run = runs[idx]
+    verdict = "RUNNING" if run.passed is None else ("PASSED" if run.passed else "FAILED")
+    vicon = {"PASSED": "✅", "FAILED": "❌", "RUNNING": "⏳"}[verdict]
+    name = Path(run.config).name if run.config else "(no run config)"
+    n_pass = sum(1 for s in run.steps if s.outcome == "passed")
+    shape = [s.id for s in run.steps]
+    prev = next((r for r in reversed(runs[:idx]) if r.passed is not None and [s.id for s in r.steps] == shape), None)
+    out = [f"# Test report: {name} — {vicon} {verdict}", ""]
+    facts = [("run", f"`{run.id}`"), ("started", f"{run.start:%Y-%m-%d %H:%M:%S} UTC"),
+             ("wall time", _dur(run.seconds)), ("steps passed", f"{n_pass} / {len(run.steps)}")]
+    if prev is not None and prev.seconds > 0 and run.passed is not None:
+        d = (run.seconds - prev.seconds) / prev.seconds
+        facts.append(("vs previous run of these steps", f"{d * 100:+.0f}% (`{prev.id}`: {_dur(prev.seconds)})"))
+    if run.why:
+        facts.append(("stopped because", _md(run.why)))
+    out += ["| | |", "|---|---|"] + [f"| {k} | {v} |" for k, v in facts] + [""]
+
+    metric_keys = sorted({k for s in run.steps for k in s.metrics})
+    out += ["## Steps", "",
+            "| step | outcome | start | took | median earlier | change | " + "".join(f"{_md(k)} | " for k in metric_keys),
+            "|---|---|--:|--:|--:|--:|" + "--:|" * len(metric_keys)]
+    for s in run.steps:
+        med, n = _median_before(runs, idx, s.id)
+        ch = (f"{(s.seconds - med) / med * 100:+.0f}%"
+              if med and med >= MIN_SECONDS and s.seconds >= MIN_SECONDS and s.outcome == "passed" else "")
+        st = STATUS.get(s.outcome, "warning")
+        out.append(f"| {_md(s.id)} | {MD_ICON[st]} {_md(s.outcome)} | +{_dur((s.start - run.start).total_seconds())} "
+                   f"| {_dur(s.seconds)} | {_dur(med) + f' (n={n})' if med else ''} | {ch} | "
+                   + "".join(f"{_md(s.metrics.get(k, ''))} | " for k in metric_keys))
+    out.append("")
+
+    # timeline: mermaid gantt (rendered by GitHub, GitLab, most markdown viewers)
+    if run.steps:
+        out += ["## Timeline", "", "```mermaid", "gantt", "    dateFormat X", "    axisFormat %H:%M",
+                f"    title {name} — {verdict}"]
+        for i, s in enumerate(run.steps):
+            tag = {"passed": "done", "running": "active"}.get(s.outcome, "crit")
+            if s.outcome == "skipped":
+                continue
+            label = re.sub(r"[:#;]", " ", f"{s.id} ({_dur(s.seconds)})")
+            start = int(s.start.replace(tzinfo=timezone.utc).timestamp())
+            out.append(f"    {label} :{tag}, s{i}, {start}, {max(int(round(s.seconds)), 1)}s")
+        out += ["```", ""]
+
+    bad = [s for s in run.steps if STATUS.get(s.outcome, "warning") in ("critical", "serious", "warning")]
+    if bad:
+        out += ["## Not as expected", ""]
+        for s in bad:
+            out += [f"### {MD_ICON[STATUS.get(s.outcome, 'warning')]} {s.id}: {s.outcome}", ""]
+            if s.detail:
+                out += [f"> {_md(s.detail)}", ""]
+            tail = _log_tail(store, s.id) if store is not None else ""
+            if tail:
+                out += [f"Last lines of `logs/{s.id}.log`:", "", "```text", tail, "```", ""]
+    out.append(f"_Built from the journal by testrunner ({len(runs)} run(s) in it)._")
+    return "\n".join(out) + "\n"
+
+
+def _publish(out: Path, text: str, latest_name: str) -> None:
+    atomic_write(out, text)
+    latest = out.parent / latest_name
+    try:
+        tmp = out.parent / f".{latest_name}.tmp"
         if tmp.is_symlink() or tmp.exists():
             tmp.unlink()
         os.symlink(out.name, tmp)
         os.replace(tmp, latest)
     except OSError:
-        atomic_write(latest, page)
-    return out
+        atomic_write(latest, text)
+
+
+FORMATS = ("md", "html")
+
+
+def write(store: Store, run_id: str | None = None, formats: tuple[str, ...] = ("md",)) -> list[Path]:
+    """Write the report(s) of a run (default: the last) into <state>/reports/; return the paths."""
+    unknown = set(formats) - set(FORMATS)
+    if unknown:
+        raise ValueError(f"unknown report format(s) {', '.join(sorted(unknown))}; want {', '.join(FORMATS)}")
+    runs = runs_from_journal(store)
+    if not runs:
+        raise ValueError("no runs in the journal")
+    run = next((r for r in runs if r.id == run_id), None) if run_id else runs[-1]
+    if run is None:
+        raise ValueError(f"no run {run_id!r} in the journal")
+    stem = f"{run.start:%Y%m%dT%H%M%SZ}-{run.id}"
+    paths = []
+    if "md" in formats:
+        p = store.path("reports", f"{stem}.md")
+        _publish(p, render_markdown(runs, run.id, store), "latest.md")
+        paths.append(p)
+    if "html" in formats:
+        p = store.path("reports", f"{stem}.html")
+        _publish(p, render(runs, run.id), "latest.html")
+        paths.append(p)
+    return paths

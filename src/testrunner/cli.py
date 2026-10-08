@@ -8,7 +8,8 @@
   testrunner --scenario           the scenario this directory is committed to
   testrunner --select -c NAME     commit this directory to a scenario, run nothing
   testrunner --release            end the scenario (refused while a run changes state)
-  testrunner --report [RUN]       (re)build a run's timing report from the journal
+  testrunner --report [steps]     run, then write a test report (markdown; --report-format)
+  testrunner --report-of RUN      (re)build the report of an earlier run from the journal
   --config NAME|FILE   --with key=value   --color auto|always|never   --root DIR
 
 The first state-changing run in a directory selects its SCENARIO (the resolved run
@@ -55,8 +56,12 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--scenario", action="store_true", help="show the scenario in force")
     g.add_argument("--select", action="store_true", help="select the scenario, run nothing")
     g.add_argument("--release", action="store_true", help="end the scenario")
-    g.add_argument("--report", nargs="?", const="", metavar="RUN",
-                   help="(re)build the timing report of a run (default: the last) from the journal")
+    g.add_argument("--report-of", metavar="RUN",
+                   help="build the report of an earlier run (a run id, or 'last') from the journal")
+    p.add_argument("--report", action="store_true",
+                   help="write a test report for this run when it ends (only then is one written)")
+    p.add_argument("--report-format", default="md", metavar="md|html|both",
+                   help="the report's format (default: md)")
     p.add_argument("--version", action="version", version=f"testrunner {__version__}")
     return p
 
@@ -75,11 +80,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.release:
             return release(store, style)
-        if args.report is not None:
+        formats = ("md", "html") if args.report_format == "both" else (args.report_format,)
+        if args.report_format not in ("md", "html", "both"):
+            # refused BEFORE anything runs: a typo must not cost a two-hour run its report
+            raise ConfigError(f"--report-format {args.report_format!r}: want md, html or both")
+        if args.report_of is not None:
             from . import report
             try:
-                print(report.write(store, args.report or None))
-            except (ValueError, StopIteration) as e:
+                for path in report.write(store, None if args.report_of == "last" else args.report_of, formats):
+                    print(path)
+            except ValueError as e:
                 print(style.bad(f"ERROR: {e}"), file=sys.stderr)
                 return EXIT_USAGE
             return 0
@@ -139,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     ui = InputBroker(interactive=False if args.non_interactive else None)
     try:
         runner = Runner(rc, reg, run_config, store, ui, color=args.color, run_id=run_id,
-                        readonly=readonly)
+                        readonly=readonly, report_formats=formats if args.report else ())
     except FixtureError as e:
         print(style.bad(f"ERROR: {e}"), file=sys.stderr)
         return EXIT_USAGE
