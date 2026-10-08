@@ -7,8 +7,9 @@ seen, with a delay, and end in a carriage return (raw mode takes CR, not LF, as 
 
 Expect rules: [{expect: <regex>, send: <text>, delay: <s>}]. Each rule fires every time
 its pattern appears in NEW output; rules are scanned in order, first match wins per
-read. A prompt no rule answers (output stops mid-line for `prompt_idle` seconds) goes to
-the operator through the input broker — or, without one, fails the command.
+read. A prompt no rule answers (output stops mid-line for `prompt_idle` seconds, on a
+line that ends like a prompt — `prompt_pattern`) goes to the operator through the input
+broker — or, without one, fails the command.
 """
 from __future__ import annotations
 
@@ -31,6 +32,10 @@ from .ui import InputBroker, NotInteractive
 
 DEFAULT_DELAY = 1.5
 DEFAULT_PROMPT_IDLE = 20.0
+# What a stalled partial line must END with to count as a prompt. Without it, a progress
+# line that goes quiet ("Waiting for the domain to get an IP address...") would be taken
+# for a question — and, with nobody attached, its command killed.
+DEFAULT_PROMPT_PATTERN = r"[:?>\]#$]\s*$"
 
 
 @dataclass
@@ -92,10 +97,12 @@ class Proc:
 
     def __init__(self, cwd: Path, log_dir: Path, ui: InputBroker | None = None,
                  echo: TextIO | None = None, env: dict[str, str] | None = None,
-                 prompt_idle: float = DEFAULT_PROMPT_IDLE, color: bool = True):
+                 prompt_idle: float = DEFAULT_PROMPT_IDLE, color: bool = True,
+                 prompt_pattern: str = DEFAULT_PROMPT_PATTERN):
         self.cwd, self.log_dir, self.ui, self.echo = Path(cwd), Path(log_dir), ui, echo
         self.env = env or {}
         self.color = color
+        self.prompt_re = re.compile(prompt_pattern)
         self.prompt_idle = prompt_idle
 
     async def run(self, argv: list[str] | str, *, cwd: Path | None = None,
@@ -197,7 +204,7 @@ class Proc:
                 if line_start < scanned:
                     continue   # this partial line was already answered
                 tail = bytes(plain[line_start:]).decode(errors="replace").strip()
-                if not tail:
+                if not tail or not self.prompt_re.search(tail):
                     continue
                 if self.ui is None or not self.ui.interactive:
                     unanswered = tail

@@ -97,3 +97,16 @@ def test_stripper_handles_a_sequence_split_across_chunks(cut):
     data = b"ab\x1b[1;31mcd\x1b[0mef"
     s = Stripper()
     assert s.feed(data[:cut]) + s.feed(data[cut:]) + s.flush() == b"abcdef"
+
+
+def test_a_quiet_progress_line_is_not_a_prompt(tmp_path):
+    r = run(Proc(tmp_path, tmp_path).run("printf 'Waiting for the domain...'; sleep 1.2; echo done",
+                                         prompt_idle=0.3, timeout=20))
+    assert r.ok and r.unanswered is None
+
+
+def test_without_the_pattern_it_would_be_killed(tmp_path):
+    # negative control for the test above: a pattern that accepts any line
+    r = run(Proc(tmp_path, tmp_path, prompt_pattern=r".").run(
+        "printf 'Waiting for the domain...'; sleep 1.2; echo done", prompt_idle=0.3, timeout=20))
+    assert not r.ok and r.unanswered == "Waiting for the domain..."

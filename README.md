@@ -164,7 +164,9 @@ default_path: lifecycle        # what ranges slice (implied when there is one pa
 configs: {dir: configs, env: MY_CONFIG, link: my.yml, default: default}
 params_section: params         # the run-config section that holds step parameters
 scenario: {release_when: {...}}
-input: {prompt_idle: 20}       # seconds of silence mid-line before a prompt is assumed
+input:
+  prompt_idle: 20              # seconds of silence mid-line before a prompt is assumed...
+  prompt_pattern: '[:?>\]#$]\s*$'   # ...on a line that ends like a prompt
 ```
 `examples/toy/` is a complete subscriber that runs; read it next.
 

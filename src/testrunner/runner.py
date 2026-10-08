@@ -23,7 +23,7 @@ from .config import RunConfig, RunnerConfig, deep_merge
 from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
 from .planner import Program, Step, Walker, produced, requires_holds, when_holds
-from .proc import Proc
+from .proc import DEFAULT_PROMPT_PATTERN, Proc
 from .store import Store
 from .term import Style, color_enabled
 from .ui import InputBroker
@@ -264,7 +264,8 @@ class Runner:
                              "TR_STATE_DIR": str(self.store.root), "TR_PARAMS": json.dumps(params),
                              "TR_CONFIG_FILE": str(self.run_config.file or ""),
                              "TR_WITH": json.dumps(deep_merge(run.program.params, step.with_))},
-                        prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color)
+                        prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color,
+                        prompt_pattern=rc.input.get("prompt_pattern", DEFAULT_PROMPT_PATTERN))
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
             outcome = await self._execute(act, scope, ctx, step_data)
