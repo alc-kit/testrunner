@@ -151,11 +151,15 @@ def _register_shell(reg: Registry, name: str, spec: dict, rc: RunnerConfig) -> N
         shell={**spec, "exit_codes": exit_codes}, source=where)
 
 
-def _check_values(rc: RunnerConfig, where: str, mapping: dict, allow_list: bool) -> None:
+def _check_values(rc: RunnerConfig, where: str, mapping: dict, allow_list: bool,
+                  allow_map: bool = False) -> None:
     for var, val in mapping.items():
         if var not in rc.states:
             raise ConfigError(f"{where}: unknown state variable {var!r} (declared: {', '.join(rc.states) or 'none'})")
-        vals = val if (allow_list and isinstance(val, list)) else [val]
+        if allow_map and isinstance(val, dict):     # a transition map {current: next}
+            vals = [*val.keys(), *val.values()]
+        else:
+            vals = val if (allow_list and isinstance(val, list)) else [val]
         for v in vals:
             if v not in rc.states[var]["values"]:
                 raise ConfigError(f"{where}: {var}={v!r} is not one of {rc.states[var]['values']}")
@@ -166,11 +170,11 @@ def validate_registry(reg: Registry, rc: RunnerConfig) -> None:
         if a.readonly and (a.produces or a.produces_on):
             raise ConfigError(f"{a.source}: a readonly action cannot produce state")
         _check_values(rc, f"{a.source} requires", a.requires, allow_list=True)
-        _check_values(rc, f"{a.source} produces", a.produces, allow_list=False)
+        _check_values(rc, f"{a.source} produces", a.produces, allow_list=False, allow_map=True)
         for outcome, mapping in a.produces_on.items():
             if outcome not in a.all_outcomes:
                 raise ConfigError(f"{a.source}: produces_on names outcome {outcome!r}, which it does not declare")
-            _check_values(rc, f"{a.source} produces_on.{outcome}", mapping, allow_list=False)
+            _check_values(rc, f"{a.source} produces_on.{outcome}", mapping, allow_list=False, allow_map=True)
     for var in reg.observers:
         if var not in rc.states:
             raise ConfigError(f"observer for unknown state variable {var!r}")

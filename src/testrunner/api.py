@@ -79,7 +79,8 @@ def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None
     """Export a function as an action.
 
     requires     state the action must start from: {var: value} or {var: [values]}
-    produces     state it leaves behind when it PASSES
+    produces     state it leaves behind when it PASSES: {var: value}, or a transition
+                 map {var: {current: next}} (a current value not listed is kept)
     produces_on  state it leaves behind on another outcome: {outcome: {var: value}}
     outcomes     named outcomes it may return besides the built-in ones
     readonly     it only looks: it produces no state, and a run of read-only steps may

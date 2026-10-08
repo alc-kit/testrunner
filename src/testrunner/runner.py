@@ -263,7 +263,7 @@ class Runner:
                         env={"TR_STEP": step.id, "TR_ACTION": act.name, "TR_RUN_ID": self.run_id,
                              "TR_STATE_DIR": str(self.store.root), "TR_PARAMS": json.dumps(params),
                              "TR_CONFIG_FILE": str(self.run_config.file or ""),
-                             "TR_STEP_WITH": json.dumps(step.with_)},
+                             "TR_WITH": json.dumps(deep_merge(run.program.params, step.with_))},
                         prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color)
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
@@ -278,11 +278,11 @@ class Runner:
         if outcome.name not in act.all_outcomes:
             outcome = Outcome(ERRORED, f"returned undeclared outcome {outcome.name!r} ({outcome.detail})")
         # state: what the outcome produces, then what reality says
-        if outcome.name not in (ERRORED, ABORTED):
-            run.state.update(produced(act, outcome.name))
+        changed = produced(act, outcome.name, run.state) if outcome.name not in (ERRORED, ABORTED) else {}
+        run.state.update(changed)
         expect = run.program.expected(step.id)
         if outcome.name not in (ABORTED,):
-            for var in set(produced(act, outcome.name)) | set(expect.state):
+            for var in set(changed) | set(expect.state):
                 if var in self.reg.observers:
                     seen = await self._observe(var, run_scope)
                     if seen != run.state.get(var):

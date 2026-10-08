@@ -252,10 +252,10 @@ def test_shell_action_sees_the_runner_environment(sub, capsys):
         states: {s: {values: [a], initial: a}}
         actions:
           show:
-            run: 'printf "%s|%s|%s|%s\\n" "$TR_STEP" "$TR_STEP_WITH" "$TR_CONFIG_FILE" "$TR_PARAMS" > out.txt'
+            run: 'printf "%s|%s|%s|%s\\n" "$TR_STEP" "$TR_WITH" "$TR_CONFIG_FILE" "$TR_PARAMS" > out.txt'
         """)
     sub.write("configs/default.yml", "params: {n: 1}\nplan:\n  path: [{action: show, with: {m: 2}}]\n")
-    assert sub.run(capsys=capsys)[0] == 0
-    step, step_with, cfg, params = (sub.root / "out.txt").read_text().strip().split("|")
-    assert step == "show" and json.loads(step_with) == {"m": 2} and cfg.endswith("default.yml")
-    assert json.loads(params) == {"n": 1, "m": 2}
+    assert sub.run("--with", "k=3", capsys=capsys)[0] == 0
+    step, with_, cfg, params = (sub.root / "out.txt").read_text().strip().split("|")
+    assert step == "show" and json.loads(with_) == {"k": 3, "m": 2} and cfg.endswith("default.yml")
+    assert json.loads(params) == {"n": 1, "k": 3, "m": 2}

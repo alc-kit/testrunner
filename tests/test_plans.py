@@ -189,3 +189,48 @@ def test_range_without_default_path_refused(sub):
     rc = load_runner_config(sub.root / "testrunner.yml")
     with pytest.raises(ConfigError, match="needs a path"):
         Compiler(rc, collect(rc)).compile(None, ["one..two"])
+
+
+TRANSITIONS = """
+modules: [mod.py]
+states:
+  rig: {values: [absent, up, installed], initial: absent}
+paths:
+  main: [bring-up, install, bring-up]
+"""
+TMOD = """
+from testrunner import action
+@action(produces={"rig": {"absent": "up"}})
+def bring_up(): pass
+@action(requires={"rig": ["up", "installed"]}, produces={"rig": {"up": "installed"}})
+def install(): pass
+@action(requires={"rig": "installed"})
+def needs_installed(): pass
+"""
+
+
+def test_transition_map_does_not_move_state_backwards(sub):
+    sub.write("testrunner.yml", TRANSITIONS)
+    sub.write("mod.py", TMOD)
+    rc = load_runner_config(sub.root / "testrunner.yml")
+    reg = collect(rc)
+    prog = Compiler(rc, reg).compile(None, ["main", "needs-installed"])
+    assert simulate(rc, reg, prog, initial_state(rc, None), {}).ok
+
+
+def test_plain_produces_would_move_it_backwards(sub):
+    # negative control: the same plan with an unconditional produces breaks needs-installed
+    sub.write("testrunner.yml", TRANSITIONS)
+    sub.write("mod.py", TMOD.replace('produces={"rig": {"absent": "up"}}', 'produces={"rig": "up"}'))
+    rc = load_runner_config(sub.root / "testrunner.yml")
+    reg = collect(rc)
+    prog = Compiler(rc, reg).compile(None, ["main", "needs-installed"])
+    v = simulate(rc, reg, prog, initial_state(rc, None), {})
+    assert not v.ok and "needs-installed" in v.errors[0]
+
+
+def test_transition_map_with_undeclared_value_refused(sub):
+    sub.write("testrunner.yml", TRANSITIONS)
+    sub.write("mod.py", TMOD.replace('{"absent": "up"}', '{"absent": "booted"}'))
+    with pytest.raises(ConfigError, match="'booted'"):
+        collect(load_runner_config(sub.root / "testrunner.yml"))

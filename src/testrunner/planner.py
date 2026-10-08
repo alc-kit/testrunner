@@ -293,8 +293,18 @@ def requires_holds(requires: dict, state: dict) -> tuple[bool, list[str]]:
     return True, unknown
 
 
-def produced(act: ActionSpec, outcome: str) -> dict:
-    return act.produces if outcome == PASSED else act.produces_on.get(outcome, {})
+def produced(act: ActionSpec, outcome: str, state: dict) -> dict:
+    """The state values an outcome sets. A value is either the new value, or a TRANSITION
+    MAP {current: next}: a current value the map does not list stays as it is."""
+    spec = act.produces if outcome == PASSED else act.produces_on.get(outcome, {})
+    out = {}
+    for var, val in spec.items():
+        if isinstance(val, dict):
+            if state.get(var) in val:
+                out[var] = val[state.get(var)]
+        else:
+            out[var] = val
+    return out
 
 
 @dataclass
@@ -385,7 +395,7 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
         outcome = exp if run else SKIPPED
         v.walk.append(step.id if run else f"({step.id}: skipped, when)")
         if run:
-            state.update(produced(reg.actions[step.action], outcome))
+            state.update(produced(reg.actions[step.action], outcome, state))
         cur = walker.next(cur, outcome).cursor
 
     stack = [(walker.start(), dict(state0), {}, ())]
@@ -424,7 +434,7 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
         exp = prog.expected(step.id)
         outcomes = {exp.outcome} | set(prog.reactions.get(step.id, {}))
         for outcome in sorted(outcomes):
-            new = {**state, **produced(act, outcome)}
+            new = {**state, **produced(act, outcome, state)}
             if outcome == exp.outcome:
                 for var, val in exp.state.items():
                     if new.get(var) is not None and new[var] != val:

@@ -51,8 +51,8 @@ runs in a thread. `readonly=True` marks an action that only looks.
 
 Shell commands export the same contract from YAML, so existing scripts work unchanged.
 Every command testrunner starts sees `TR_STEP`, `TR_ACTION`, `TR_RUN_ID`, `TR_STATE_DIR`,
-`TR_CONFIG_FILE`, `TR_PARAMS` (the step's parameters, JSON) and `TR_STEP_WITH` (only what
-the plan set for this step, JSON):
+`TR_CONFIG_FILE`, `TR_PARAMS` (the step's parameters, JSON) and `TR_WITH` (only the
+overrides: plan `with`, `--with` and the step's own `with`, JSON):
 ```yaml
 actions:
   install:
@@ -62,6 +62,10 @@ actions:
     requires: {service: absent}
     produces: {service: installed}
 ```
+
+`produces` can also be a **transition map**: `produces: {rig: {up: installed}}` moves
+`up` to `installed` and leaves any other value alone, so re-running an idempotent step
+on a system that is further along does not move it backwards.
 
 **Fixtures** — built in: `run`, `config`, `store`, `ui`, `registry` (per run) and `step`,
 `params`, `proc`, `state` (per step). Your own:
