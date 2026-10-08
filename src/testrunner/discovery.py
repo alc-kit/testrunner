@@ -63,6 +63,12 @@ def _module_files(entry: Path) -> list[Path]:
     raise ConfigError(f"module path {entry} does not exist")
 
 
+def _import_plain(path: Path):
+    """A module in a pythonpath directory: imported by its REAL name, so a neighbour that
+    does `import <name>` gets this same module object — not a second copy."""
+    return importlib.import_module(path.stem)
+
+
 def _import(path: Path):
     # Named after the absolute path: two subscribers (or two checkouts of one) that both
     # have actions/main.py must not get each other's module from sys.modules.
@@ -100,7 +106,8 @@ def collect(rc: RunnerConfig) -> Registry:
     seen: set[int] = set()
     for entry in rc.modules:
         for f in _module_files(entry):
-            module = _import(f)
+            plain = f.parent.resolve() in {p.resolve() for p in rc.pythonpath}
+            module = _import_plain(f) if plain else _import(f)
             for obj in vars(module).values():
                 mark = getattr(obj, MARK, None)
                 if mark is None or id(obj) in seen:

@@ -272,3 +272,25 @@ def test_missing_pythonpath_dir_refused(sub, capsys):
     sub.write("testrunner.yml", "modules: [actions/]\npythonpath: [nope/]\nstates: {s: {values: [a], initial: a}}\n")
     sub.write("actions/a.py", "from testrunner import action\n@action()\ndef x(): pass\n")
     assert sub.run("x", capsys=capsys)[0] == 2
+
+
+def test_neighbour_import_gets_the_same_module(sub, capsys):
+    sub.write("testrunner.yml", "modules: [actions/]\npythonpath: [actions/]\nstates: {s: {values: [a], initial: a}}\n")
+    sub.write("actions/common.py", "COUNT = []\nCOUNT.append(1)\n")
+    sub.write("actions/a.py", "from testrunner import action\nimport common\n@action()\ndef once():\n    assert common.COUNT == [1]\n")
+    assert sub.run("once", capsys=capsys)[0] == 0
+
+
+def test_unanswered_gate_is_not_forwarded_when_told_not_to(tmp_path):
+    import asyncio
+    import io
+    from testrunner.proc import Proc
+    from testrunner.ui import InputBroker
+    ui = InputBroker(interactive=True, out=io.StringIO())
+
+    async def go():
+        ui._questions = asyncio.Queue()
+        return await Proc(tmp_path, tmp_path, ui=ui).run("printf 'Type YES:'; read -r a", prompt_idle=0.3,
+                                                         timeout=20, ask_operator=False)
+    r = asyncio.run(go())
+    assert r.unanswered == "Type YES:" and ui._questions.empty()

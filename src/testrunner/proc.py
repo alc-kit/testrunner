@@ -116,6 +116,7 @@ class Proc:
                   env: dict[str, str] | None = None, log: str | None = None,
                   rules: Any = None, timeout: float | None = None,
                   prompt_idle: float | None = None, echo: bool = True, nolog: bool | None = None,
+                  ask_operator: bool = True,
                   on_output: Callable[[bytes], None] | None = None) -> Result:
         if isinstance(argv, str):
             argv = ["bash", "-c", argv]
@@ -227,7 +228,7 @@ class Proc:
                 tail = bytes(plain[line_start:]).decode(errors="replace").strip()
                 if not tail or not self.prompt_re.search(tail):
                     continue
-                if self.ui is None or not self.ui.interactive:
+                if self.ui is None or not self.ui.interactive or not ask_operator:
                     unanswered = tail
                     _kill(proc)
                     return

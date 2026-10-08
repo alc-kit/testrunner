@@ -105,12 +105,15 @@ class Ansible:
     # ── running ──
     async def playbook(self, playbook: str | Path, *args: str, limit: Iterable[str] | str | None = None,
                        extra: dict[str, Any] | None = None, rules: Any = None, log: str | None = None,
-                       timeout: float | None = None, check: bool = True, echo: bool = True) -> Result:
+                       timeout: float | None = None, check: bool = True, echo: bool = True,
+                       prompt_idle: float | None = None, ask_operator: bool = True) -> Result:
         """ansible-playbook PLAYBOOK [args] -i INVENTORY [--limit ...] [-e k=v ...].
-        check=True turns a non-zero exit into a FAILED outcome."""
+        check=True turns a non-zero exit into a FAILED outcome. ask_operator=False: a prompt
+        no rule answers ends the run instead of being forwarded (a gate that must NOT be passed)."""
         argv = [*self.argv(), str(playbook), *args, "-i", self.inventory,
                 *self.limit_arg(limit), *self.extra_args(extra)]
-        r = await self._run(argv, rules=rules, log=log, timeout=timeout, echo=echo)
+        r = await self._run(argv, rules=rules, log=log, timeout=timeout, echo=echo,
+                            prompt_idle=prompt_idle, ask_operator=ask_operator)
         if check:
             self.raise_for(r, f"{Path(str(playbook)).name}")
         return r
