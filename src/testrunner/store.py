@@ -21,6 +21,7 @@ import fcntl
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -83,7 +84,9 @@ class Journal:
 
     def append(self, event: str, **fields: Any) -> None:
         self.file.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"at": utcnow(), "event": event, **fields}, sort_keys=True)
+        # `at` is for people (second resolution); `ts` (epoch seconds) is for arithmetic
+        line = json.dumps({"at": utcnow(), "ts": round(time.time(), 3), "event": event, **fields},
+                          sort_keys=True)
         with self.file.open("a") as f:
             f.write(line + "\n")
 

@@ -8,6 +8,7 @@
   testrunner --scenario           the scenario this directory is committed to
   testrunner --select -c NAME     commit this directory to a scenario, run nothing
   testrunner --release            end the scenario (refused while a run changes state)
+  testrunner --report [RUN]       (re)build a run's timing report from the journal
   --config NAME|FILE   --with key=value   --color auto|always|never   --root DIR
 
 The first state-changing run in a directory selects its SCENARIO (the resolved run
@@ -54,6 +55,8 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--scenario", action="store_true", help="show the scenario in force")
     g.add_argument("--select", action="store_true", help="select the scenario, run nothing")
     g.add_argument("--release", action="store_true", help="end the scenario")
+    g.add_argument("--report", nargs="?", const="", metavar="RUN",
+                   help="(re)build the timing report of a run (default: the last) from the journal")
     p.add_argument("--version", action="version", version=f"testrunner {__version__}")
     return p
 
@@ -72,6 +75,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.release:
             return release(store, style)
+        if args.report is not None:
+            from . import report
+            try:
+                print(report.write(store, args.report or None))
+            except (ValueError, StopIteration) as e:
+                print(style.bad(f"ERROR: {e}"), file=sys.stderr)
+                return EXIT_USAGE
+            return 0
         reg = collect(rc)
         if args.list:
             return listing(rc, reg)

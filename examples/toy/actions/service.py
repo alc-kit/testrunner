@@ -25,9 +25,10 @@ async def start(sandbox: Path, proc):
 
 
 @action(requires={"service": "running"}, produces={"data": "seeded"}, outcomes=["degraded"])
-async def seed(sandbox: Path, params):
+async def seed(sandbox: Path, params, step):
     """put data into the service"""
     (sandbox / "data").write_text("x" * int(params.get("rows", 3)))
+    step.metric("rows", int(params.get("rows", 3)))      # shows up in the timing report
     if params.get("degrade"):
         return Outcome("degraded", "seeded, but slowly")
 

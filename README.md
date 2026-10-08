@@ -140,6 +140,19 @@ If no rule answers a prompt, it goes to the operator, or fails the step when nob
 attached (`--non-interactive`, CI). While a run is going you can type `status` or
 `abort`. Colour follows `--color auto|always|never`, `NO_COLOR` and `FORCE_COLOR`.
 
+## Timing reports
+
+Every run writes a self-contained HTML page to `<state_dir>/reports/`, and
+`reports/latest.html` always points at the newest. The page shows:
+- a timeline of the steps, coloured by outcome, with the outcome also written out;
+- each step's change against the median of its earlier passed runs (faster in blue,
+  slower in red);
+- a table with every number.
+
+The page is built from the journal alone, so `testrunner --report [RUN]` rebuilds it for
+any past run. An action or a `step_end` hook can add its own numbers to the table with
+`step.metric("tasks", 779)`. They are recorded in the journal too.
+
 ## NOLOG: values that must not be logged
 
 Nothing is treated as secret unless it is **marked**. A marked value is replaced by
@@ -164,7 +177,7 @@ does, so later runners can use them. It also records which values are NOLOG.
 testrunner                       run the run config's plan
 testrunner a..c d                run these steps (actions, paths, ranges), in order
 testrunner --plan [steps]        validate and print the walk; run nothing
-testrunner --list | --status | --scenario | --select -c NAME | --release
+testrunner --list | --status | --scenario | --select -c NAME | --release | --report [RUN]
   -c/--config NAME   -w/--with key=value   --color MODE   --non-interactive   --root DIR
 ```
 Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).

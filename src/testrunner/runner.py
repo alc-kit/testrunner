@@ -24,6 +24,7 @@ from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
 from .planner import Program, Step, Walker, produced, requires_holds, when_holds
 from .proc import DEFAULT_PROMPT_PATTERN, Proc
+from . import report
 from .nolog import Secrets, values_at
 from .store import Store
 from .term import Style, color_enabled, forward_colour
@@ -107,6 +108,11 @@ class StepContext(Background):
         self.id, self.action, self.index = step.id, action.name, index
         self.spec, self.log_dir, self.params = step, log_dir, params
         self.started = time.monotonic()
+        self.metrics: dict[str, Any] = {}
+
+    def metric(self, name: str, value: Any) -> None:
+        """Record a number (or short text) for this step: journalled, shown in the report."""
+        self.metrics[name] = value
 
 
 class StateView(dict):
@@ -230,6 +236,11 @@ class Runner:
                 self.say(self.style.dim(f"scenario released: the state reached {rw}"))
         await self.hook("run_end", run=run, result=result)
         self._summary(result)
+        try:   # a report is a convenience: it never changes a run's result
+            path = report.write(self.store, self.run_id)
+            self.say(self.style.dim(f"timing report: {path}"))
+        except Exception as e:  # noqa: BLE001
+            self.say(self.style.warn(f"no timing report: {e}"))
         return result
 
     async def _observe(self, var: str, scope: Scope) -> Any:
@@ -312,14 +323,16 @@ class Runner:
                         seconds=time.monotonic() - started, state=dict(run.state))
         run.results.append(sr)
         run.current = None
+        # step_end hooks run BEFORE the journal line, so the metrics they record land in it
+        await self.hook("step_end", run=run, step=ctx, result=sr)
         self.journal("step_end", step=step.id, action=act.name, outcome=outcome.name,
-                                  detail=outcome.detail, seconds=round(sr.seconds, 1), state=run.state)
+                     detail=outcome.detail, seconds=round(sr.seconds, 1), state=run.state,
+                     metrics=ctx.metrics)
         as_expected = outcome.name == expect.outcome
         mark = "" if as_expected else f"  (expected {expect.outcome})"
         line = (f"---- {step.id}: {outcome.name}{mark} ({sr.seconds:.1f}s)"
                 + (f" — {outcome.detail}" if outcome.detail else ""))
         self.say(self.style.ok(line) if as_expected else self.style.bad(line))
-        await self.hook("step_end", run=run, step=ctx, result=sr)
         return sr
 
     async def _execute(self, act: ActionSpec, scope: Scope, ctx: StepContext, step_data: dict) -> Outcome:
