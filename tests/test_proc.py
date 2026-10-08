@@ -135,3 +135,11 @@ def test_always_tells_children_to_force_colour(tmp_path):
     assert "1/1" in r.text
     r = run(Proc(tmp_path, tmp_path, color=True).run('echo "[$FORCE_COLOR]"'))
     assert "[]" in r.text
+
+
+def test_none_unsets_an_inherited_variable(tmp_path, monkeypatch):
+    monkeypatch.setenv("TR_GONE", "was-here")
+    r = run(Proc(tmp_path, tmp_path).run('echo "[${TR_GONE-unset}]"', env={"TR_GONE": None}))
+    assert "[unset]" in r.text
+    r = run(Proc(tmp_path, tmp_path).run('echo "[${TR_GONE-unset}]"'))
+    assert "[was-here]" in r.text          # control: without None it is inherited

@@ -126,7 +126,9 @@ class Proc:
             if r.nolog:
                 self.secrets.add(r.send.rstrip("\r\n"))
         idle_limit = self.prompt_idle if prompt_idle is None else prompt_idle
-        full_env = {**os.environ, **child_env(self.color, self.force_color), **self.env, **(env or {})}
+        # a None value UNSETS the variable (an inherited one too): "false" can mean "absent"
+        merged = {**os.environ, **child_env(self.color, self.force_color), **self.env, **(env or {})}
+        full_env = {k: str(v) for k, v in merged.items() if v is not None}
         master, slave = os.openpty()
         rows, cols = window_size(self.echo) if self.echo is not None else (50, 200)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
