@@ -167,3 +167,7 @@ scenario: {release_when: {...}}
 input: {prompt_idle: 20}       # seconds of silence mid-line before a prompt is assumed
 ```
 `examples/toy/` is a complete subscriber that runs; read it next.
+
+## Licence
+
+MIT — see `LICENSE`.
