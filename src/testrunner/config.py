@@ -15,10 +15,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .nolog import NoLog, unwrap
+
 try:
     import yaml
 except ImportError:  # TOML-only subscribers need no third-party package at all
     yaml = None
+
+if yaml is not None:
+    class _Loader(yaml.SafeLoader):
+        """SafeLoader + the `!NOLOG value` shorthand (see nolog.py)."""
+
+    def _nolog(loader, node):
+        if isinstance(node, yaml.ScalarNode):
+            return NoLog(loader.construct_scalar(node))
+        if isinstance(node, yaml.SequenceNode):
+            return NoLog(loader.construct_sequence(node, deep=True))
+        return NoLog(loader.construct_mapping(node, deep=True))
+
+    _Loader.add_constructor("!NOLOG", _nolog)
 
 EXTENSIONS = (".yml", ".yaml", ".toml")
 RUNNER_FILES = ("testrunner.yml", "testrunner.yaml", "testrunner.toml")
@@ -38,7 +53,7 @@ def load_file(path: Path) -> dict[str, Any]:
             if yaml is None:
                 raise ConfigError(f"{path}: YAML needs PyYAML (python3-pyyaml); or use TOML")
             with path.open() as f:
-                data = yaml.safe_load(f)
+                data = yaml.load(f, Loader=_Loader)
         else:
             raise ConfigError(f"{path}: unknown config format (want {', '.join(EXTENSIONS)})")
     except (OSError, tomllib.TOMLDecodeError) as e:
@@ -172,6 +187,7 @@ class RunConfig:
     file: Path | None
     how: str
     data: dict[str, Any]
+    nolog_paths: list[str] = field(default_factory=list)   # dotted paths marked NOLOG
 
     @property
     def plan(self) -> Any:
@@ -244,7 +260,8 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
     if isinstance(plan, dict) and True in plan:
         # YAML 1.1 reads a bare `on:` key as the boolean true (as in GitHub Actions files)
         data["plan"] = {("on" if k is True else k): v for k, v in plan.items()}
-    return RunConfig(file, how, data)
+    data, nolog_paths = unwrap(data)
+    return RunConfig(file, how, data, nolog_paths)
 
 
 def parse_with(items: list[str]) -> dict[str, Any]:

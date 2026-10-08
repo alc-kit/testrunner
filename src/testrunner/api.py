@@ -53,6 +53,7 @@ class ActionMark:
     tags: tuple[str, ...] = ()
     doc: str = ""
     readonly: bool = False
+    nolog: bool = False
 
 
 @dataclass
@@ -75,7 +76,7 @@ def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None
            produces: Mapping[str, Any] | None = None,
            produces_on: Mapping[str, Mapping[str, Any]] | None = None,
            outcomes: Iterable[str] = (), tags: Iterable[str] = (),
-           readonly: bool = False) -> Callable:
+           readonly: bool = False, nolog: bool = False) -> Callable:
     """Export a function as an action.
 
     requires     state the action must start from: {var: value} or {var: [values]}
@@ -85,13 +86,14 @@ def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None
     outcomes     named outcomes it may return besides the built-in ones
     readonly     it only looks: it produces no state, and a run of read-only steps may
                  run beside a state-changing run in the same directory
+    nolog        NOLOG: the output of the commands it runs is neither logged nor shown
     """
     def mark(fn: Callable) -> Callable:
         setattr(fn, MARK, ActionMark(
             name=name or fn.__name__.replace("_", "-"),
             requires=dict(requires or {}), produces=dict(produces or {}),
             produces_on={k: dict(v) for k, v in (produces_on or {}).items()},
-            outcomes=tuple(outcomes), tags=tuple(tags), readonly=readonly,
+            outcomes=tuple(outcomes), tags=tuple(tags), readonly=readonly, nolog=nolog,
             doc=(fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""))
         return fn
     return mark

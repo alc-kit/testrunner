@@ -28,6 +28,7 @@ class ActionSpec:
     tags: tuple[str, ...] = ()
     doc: str = ""
     readonly: bool = False
+    nolog: bool = False
     fn: Callable | None = None      # python
     shell: dict | None = None       # shell: {run, env, cwd, rules, exit_codes, timeout}
     source: str = ""
@@ -113,7 +114,7 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
         reg.actions[mark.name] = ActionSpec(
             name=mark.name, kind="python", requires=mark.requires, produces=mark.produces,
             produces_on=mark.produces_on, outcomes=mark.outcomes, tags=mark.tags,
-            doc=mark.doc, readonly=mark.readonly, fn=obj, source=where)
+            doc=mark.doc, readonly=mark.readonly, nolog=mark.nolog, fn=obj, source=where)
     elif isinstance(mark, FixtureMark):
         if mark.name in reg.fixtures:
             raise ConfigError(f"fixture {mark.name!r} exported twice: {reg.fixtures[mark.name].source} and {where}")
@@ -127,7 +128,7 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
 
 
 SHELL_KEYS = {"run", "env", "cwd", "rules", "exit_codes", "timeout", "requires", "produces",
-              "produces_on", "outcomes", "tags", "doc", "readonly"}
+              "produces_on", "outcomes", "tags", "doc", "readonly", "nolog"}
 
 
 def _register_shell(reg: Registry, name: str, spec: dict, rc: RunnerConfig) -> None:
@@ -147,7 +148,7 @@ def _register_shell(reg: Registry, name: str, spec: dict, rc: RunnerConfig) -> N
         produces=dict(spec.get("produces") or {}),
         produces_on={k: dict(v) for k, v in (spec.get("produces_on") or {}).items()},
         outcomes=outcomes, tags=tuple(spec.get("tags") or ()), doc=spec.get("doc", ""),
-        readonly=bool(spec.get("readonly", False)),
+        readonly=bool(spec.get("readonly", False)), nolog=bool(spec.get("nolog", False)),
         shell={**spec, "exit_codes": exit_codes}, source=where)
 
 

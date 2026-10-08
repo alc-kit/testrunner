@@ -24,6 +24,7 @@ from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
 from .planner import Program, Step, Walker, produced, requires_holds, when_holds
 from .proc import DEFAULT_PROMPT_PATTERN, Proc
+from .nolog import Secrets, values_at
 from .store import Store
 from .term import Style, color_enabled
 from .ui import InputBroker
@@ -88,9 +89,14 @@ class RunContext(Background):
         super().__init__("run")
         self.rc, self.run_config, self.program, self.store = rc, run_config, program, store
         self.root = rc.root
+        self.secrets = Secrets(values_at(run_config.data, run_config.nolog_paths))
         self.state: dict[str, Any] = {}
         self.results: list[StepResult] = []
         self.current: StepContext | None = None
+
+    def nolog(self, value: Any) -> Any:
+        """Mark a value NOLOG from here on (e.g. a password an action generated); returns it."""
+        return self.secrets.add(value)
 
 
 class StepContext(Background):
@@ -123,10 +129,12 @@ class Runner:
         self.fixtures = Fixtures(reg.fixtures, BUILTIN_RUN | BUILTIN_STEP)
         self._current_task: asyncio.Task | None = None
         self._aborted = False
+        # one Secrets for the whole run: config-marked values now, run.nolog() ones later
+        self.secrets = Secrets(values_at(run_config.data, run_config.nolog_paths))
 
     # ── reporting ──
     def say(self, text: str) -> None:
-        self.echo.write(text + "\n")
+        self.echo.write(self.secrets.text(text) + "\n")
         self.echo.flush()
 
     async def hook(self, name: str, **available: Any) -> None:
@@ -158,12 +166,13 @@ class Runner:
             return await self._run(program)
 
     def journal(self, event: str, **fields: Any) -> None:
-        self.store.journal.append(event, run=self.run_id, **fields)
+        self.store.journal.append(event, run=self.run_id, **self.secrets.obj(fields))
 
     async def _run(self, program: Program) -> RunResult:
         rc = self.rc
         data = deep_merge(self.run_config.data, {rc.params_section: program.params})
         run = RunContext(rc, self.run_config, program, self.store)
+        run.secrets = self.secrets
         run_scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui,
                                   "registry": self.reg})
         self.ui.attach()
@@ -265,7 +274,8 @@ class Runner:
                              "TR_CONFIG_FILE": str(self.run_config.file or ""),
                              "TR_WITH": json.dumps(deep_merge(run.program.params, step.with_))},
                         prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color,
-                        prompt_pattern=rc.input.get("prompt_pattern", DEFAULT_PROMPT_PATTERN))
+                        prompt_pattern=rc.input.get("prompt_pattern", DEFAULT_PROMPT_PATTERN),
+                        secrets=self.secrets, nolog=act.nolog)
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
             outcome = await self._execute(act, scope, ctx, step_data)
@@ -296,6 +306,7 @@ class Runner:
                     f"{k}={want!r} (is {have!r})" for k, (want, have) in wrong.items()))
         if not self.readonly:
             self.store.set_state(run.state)
+        outcome = Outcome(outcome.name, self.secrets.text(outcome.detail))
         sr = StepResult(step.id, act.name, outcome.name, outcome.detail,
                         seconds=time.monotonic() - started, state=dict(run.state))
         run.results.append(sr)
@@ -330,8 +341,8 @@ class Runner:
             return Outcome(ERRORED, str(e))
         except Exception as e:  # noqa: BLE001 — an action's exception is its failure
             tb = traceback.format_exc()
-            (ctx.log_dir / f"{ctx.id}.traceback").write_text(tb)
-            return Outcome(FAILED, f"{type(e).__name__}: {e}")
+            (ctx.log_dir / f"{ctx.id}.traceback").write_text(self.secrets.text(tb))
+            return Outcome(FAILED, self.secrets.text(f"{type(e).__name__}: {e}"))
         finally:
             self._current_task = None
         if value is None or value is True:

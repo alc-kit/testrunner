@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
+from .nolog import MASK, Secrets
 from .term import Stripper, child_env, strip, window_size
 from .ui import InputBroker, NotInteractive
 
@@ -43,14 +44,16 @@ class Rule:
     expect: re.Pattern
     send: str
     delay: float = DEFAULT_DELAY
+    nolog: bool = False             # the answer is a secret: never written to the log
 
     @classmethod
     def make(cls, spec: dict) -> "Rule":
-        unknown = set(spec) - {"expect", "send", "delay"}
+        unknown = set(spec) - {"expect", "send", "delay", "nolog"}
         if unknown or "expect" not in spec or "send" not in spec:
-            raise ValueError(f"expect rule {spec!r}: want expect, send and optionally delay")
+            raise ValueError("expect rule: want expect, send and optionally delay, nolog "
+                             f"(got keys {sorted(spec)})")
         return cls(re.compile(spec["expect"].encode() if isinstance(spec["expect"], str) else spec["expect"]),
-                   spec["send"], float(spec.get("delay", DEFAULT_DELAY)))
+                   spec["send"], float(spec.get("delay", DEFAULT_DELAY)), bool(spec.get("nolog", False)))
 
 
 def load_rules(rules: Any) -> list[Rule]:
@@ -98,22 +101,29 @@ class Proc:
     def __init__(self, cwd: Path, log_dir: Path, ui: InputBroker | None = None,
                  echo: TextIO | None = None, env: dict[str, str] | None = None,
                  prompt_idle: float = DEFAULT_PROMPT_IDLE, color: bool = True,
-                 prompt_pattern: str = DEFAULT_PROMPT_PATTERN):
+                 prompt_pattern: str = DEFAULT_PROMPT_PATTERN, secrets: Secrets | None = None,
+                 nolog: bool = False):
         self.cwd, self.log_dir, self.ui, self.echo = Path(cwd), Path(log_dir), ui, echo
         self.env = env or {}
         self.color = color
         self.prompt_re = re.compile(prompt_pattern)
+        self.secrets = secrets or Secrets()
+        self.nolog = nolog          # NOLOG action: no output to the log or the terminal
         self.prompt_idle = prompt_idle
 
     async def run(self, argv: list[str] | str, *, cwd: Path | None = None,
                   env: dict[str, str] | None = None, log: str | None = None,
                   rules: Any = None, timeout: float | None = None,
-                  prompt_idle: float | None = None, echo: bool = True,
+                  prompt_idle: float | None = None, echo: bool = True, nolog: bool | None = None,
                   on_output: Callable[[bytes], None] | None = None) -> Result:
         if isinstance(argv, str):
             argv = ["bash", "-c", argv]
         argv = [str(a) for a in argv]
         compiled = load_rules(rules)
+        quiet = self.nolog if nolog is None else nolog
+        for r in compiled:
+            if r.nolog:
+                self.secrets.add(r.send.rstrip("\r\n"))
         idle_limit = self.prompt_idle if prompt_idle is None else prompt_idle
         full_env = {**os.environ, **child_env(self.color), **self.env, **(env or {})}
         master, slave = os.openpty()
@@ -123,6 +133,8 @@ class Proc:
         if log:
             self.log_dir.mkdir(parents=True, exist_ok=True)
             logf = (self.log_dir / log).open("ab")
+            if quiet:
+                logf.write(b"[testrunner: output not logged (NOLOG)]\n")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=str(cwd or self.cwd), env=full_env,
@@ -144,7 +156,12 @@ class Proc:
         last_output = time.monotonic()
         sends: list[asyncio.Task] = []
         unanswered: str | None = None
-        echo_to = self.echo if (echo and self.echo is not None) else None
+        echo_to = self.echo if (echo and self.echo is not None and not quiet) else None
+        if quiet:
+            logf_out = None
+        else:
+            logf_out = logf
+        redact_log, redact_echo = self.secrets.stream(), self.secrets.stream()
         # bytes, not text: a decode would split multi-byte characters across chunks
         echo_bin = getattr(echo_to, "buffer", None) if echo_to is not None else None
 
@@ -162,11 +179,11 @@ class Proc:
             out.extend(chunk)
             clean = stripper.feed(chunk)
             plain.extend(clean)
-            if logf:
-                logf.write(chunk)
-                logf.flush()
+            if logf_out:
+                logf_out.write(redact_log.feed(chunk))
+                logf_out.flush()
             if echo_to is not None:
-                shown = chunk if self.color else clean
+                shown = redact_echo.feed(chunk if self.color else clean)
                 if echo_bin is not None:
                     echo_to.flush()
                     echo_bin.write(shown)
@@ -191,8 +208,9 @@ class Proc:
             await asyncio.sleep(delay)
             with contextlib.suppress(OSError):
                 os.write(master, text.encode())
-            if logf:
-                logf.write(f"\n[testrunner: sent {text!r}]\n".encode())
+            if logf_out:
+                shown = MASK if text.rstrip("\r\n") in self.secrets.values else self.secrets.text(text)
+                logf_out.write(f"\n[testrunner: sent {shown!r}]\n".encode())
 
         async def watch_prompts() -> None:
             nonlocal unanswered, scanned
@@ -241,6 +259,17 @@ class Proc:
             with contextlib.suppress(Exception):
                 loop.remove_reader(master)
             os.close(master)
+            if logf_out:
+                logf_out.write(redact_log.flush())
+            if echo_to is not None:
+                tail_bytes = redact_echo.flush()
+                if tail_bytes:
+                    if echo_bin is not None:
+                        echo_bin.write(tail_bytes)
+                        echo_bin.flush()
+                    else:
+                        echo_to.write(tail_bytes.decode(errors="replace"))
+                        echo_to.flush()
             if logf:
                 logf.close()
         return Result(argv, proc.returncode if proc.returncode is not None else -1, bytes(out),

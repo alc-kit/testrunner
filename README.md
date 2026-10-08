@@ -140,6 +140,24 @@ If no rule answers a prompt, it goes to the operator, or fails the step when nob
 attached (`--non-interactive`, CI). While a run is going you can type `status` or
 `abort`. Colour follows `--color auto|always|never`, `NO_COLOR` and `FORCE_COLOR`.
 
+## NOLOG: values that must not be logged
+
+Nothing is treated as secret unless it is **marked**. A marked value is replaced by
+`********` in everything testrunner writes: step logs, the terminal, the journal, outcome
+details and tracebacks. The action or command still gets the real value.
+```yaml
+params:
+  api_token: {NOLOG: "abc123"}     # YAML or TOML: api_token = { NOLOG = "abc123" }
+  db_password: !NOLOG hunter2      # YAML shorthand
+```
+- `run.nolog(value)` marks a value created during the run, such as a password an action generated.
+- An expect rule with `nolog: true` keeps its answer out of the log.
+- An action with `nolog=True` (shell: `nolog: true`) runs commands whose output is
+  neither logged nor shown.
+
+The scenario snapshot in the state directory keeps the real values, as the config file
+does, so later runners can use them. It also records which values are NOLOG.
+
 ## The command line
 
 ```
