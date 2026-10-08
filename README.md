@@ -49,7 +49,10 @@ async def start(proc, params):
 Return `None`/`True` (passed), `False` (failed), an `Outcome`, or raise. A sync function
 runs in a thread. `readonly=True` marks an action that only looks.
 
-Shell commands export the same contract from YAML, so existing scripts work unchanged:
+Shell commands export the same contract from YAML, so existing scripts work unchanged.
+Every command testrunner starts sees `TR_STEP`, `TR_ACTION`, `TR_RUN_ID`, `TR_STATE_DIR`,
+`TR_CONFIG_FILE`, `TR_PARAMS` (the step's parameters, JSON) and `TR_STEP_WITH` (only what
+the plan set for this step, JSON):
 ```yaml
 actions:
   install:

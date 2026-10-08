@@ -245,3 +245,17 @@ def test_status_reports_an_unfinished_step(toy, capsys):
         f.write(json.dumps({"at": "x", "event": "step_start", "step": "seed"}) + "\n")
     code, out = toy.run("--status", capsys=capsys)
     assert code == 0 and "STARTED  seed" in out
+
+
+def test_shell_action_sees_the_runner_environment(sub, capsys):
+    sub.write("testrunner.yml", """
+        states: {s: {values: [a], initial: a}}
+        actions:
+          show:
+            run: 'printf "%s|%s|%s|%s\\n" "$TR_STEP" "$TR_STEP_WITH" "$TR_CONFIG_FILE" "$TR_PARAMS" > out.txt'
+        """)
+    sub.write("configs/default.yml", "params: {n: 1}\nplan:\n  path: [{action: show, with: {m: 2}}]\n")
+    assert sub.run(capsys=capsys)[0] == 0
+    step, step_with, cfg, params = (sub.root / "out.txt").read_text().strip().split("|")
+    assert step == "show" and json.loads(step_with) == {"m": 2} and cfg.endswith("default.yml")
+    assert json.loads(params) == {"n": 1, "m": 2}

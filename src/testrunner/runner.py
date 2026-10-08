@@ -260,8 +260,10 @@ class Runner:
                               f"{ {k: run.state.get(k) for k in act.requires} }")
         else:
             proc = Proc(rc.root, log_dir, self.ui, self.echo,
-                        env={"TR_STEP": step.id, "TR_ACTION": act.name,
-                             "TR_STATE_DIR": str(self.store.root), "TR_PARAMS": json.dumps(params)},
+                        env={"TR_STEP": step.id, "TR_ACTION": act.name, "TR_RUN_ID": self.run_id,
+                             "TR_STATE_DIR": str(self.store.root), "TR_PARAMS": json.dumps(params),
+                             "TR_CONFIG_FILE": str(self.run_config.file or ""),
+                             "TR_STEP_WITH": json.dumps(step.with_)},
                         prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color)
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
