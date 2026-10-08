@@ -89,6 +89,13 @@ def _import(path: Path):
 
 
 def collect(rc: RunnerConfig) -> Registry:
+    # Directories the subscriber's modules import FROM (a library next to them, or one
+    # fetched elsewhere): first on sys.path, in the order given.
+    for p in reversed(rc.pythonpath):
+        if not p.is_dir():
+            raise ConfigError(f"pythonpath entry {p} is not a directory")
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
     reg = Registry()
     seen: set[int] = set()
     for entry in rc.modules:

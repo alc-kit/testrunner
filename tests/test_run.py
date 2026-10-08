@@ -259,3 +259,16 @@ def test_shell_action_sees_the_runner_environment(sub, capsys):
     step, with_, cfg, params = (sub.root / "out.txt").read_text().strip().split("|")
     assert step == "show" and json.loads(with_) == {"k": 3, "m": 2} and cfg.endswith("default.yml")
     assert json.loads(params) == {"n": 1, "k": 3, "m": 2}
+
+
+def test_pythonpath_lets_modules_import_a_library(sub, capsys):
+    sub.write("testrunner.yml", "modules: [actions/]\npythonpath: [lib/]\nstates: {s: {values: [a], initial: a}}\n")
+    sub.write("lib/mylib/__init__.py", "VALUE = 42\n")
+    sub.write("actions/a.py", "from testrunner import action\nimport mylib\n@action()\ndef uses():\n    assert mylib.VALUE == 42\n")
+    assert sub.run("uses", capsys=capsys)[0] == 0
+
+
+def test_missing_pythonpath_dir_refused(sub, capsys):
+    sub.write("testrunner.yml", "modules: [actions/]\npythonpath: [nope/]\nstates: {s: {values: [a], initial: a}}\n")
+    sub.write("actions/a.py", "from testrunner import action\n@action()\ndef x(): pass\n")
+    assert sub.run("x", capsys=capsys)[0] == 2

@@ -198,6 +198,7 @@ Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).
 `testrunner.yml` (or `.toml`) at the subscriber root:
 ```yaml
 modules: [actions/]            # python exports
+pythonpath: [lib/]             # directories those modules import from
 actions: {...}                 # shell exports
 state_dir: state               # the subscriber's state (journal, state, scenario, logs)
 states: {...}

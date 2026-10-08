@@ -104,6 +104,7 @@ class RunnerConfig:
     root: Path
     file: Path
     modules: list[Path] = field(default_factory=list)
+    pythonpath: list[Path] = field(default_factory=list)
     shell_actions: dict[str, dict] = field(default_factory=dict)
     state_dir: Path = Path("state")
     states: dict[str, dict] = field(default_factory=dict)
@@ -129,7 +130,7 @@ def find_runner_config(start: Path) -> Path:
 
 
 KNOWN_RUNNER_KEYS = {"modules", "actions", "state_dir", "states", "paths", "default_path",
-                     "configs", "params_section", "input", "scenario"}
+                     "configs", "params_section", "input", "scenario", "pythonpath"}
 
 
 def load_runner_config(path: Path) -> RunnerConfig:
@@ -169,6 +170,7 @@ def load_runner_config(path: Path) -> RunnerConfig:
     return RunnerConfig(
         root=root, file=path,
         modules=[root / m for m in (data.get("modules") or [])],
+        pythonpath=[root / p for p in (data.get("pythonpath") or [])],
         shell_actions=data.get("actions") or {},
         state_dir=root / data.get("state_dir", "state"),
         states=states, paths=paths, default_path=default_path,
