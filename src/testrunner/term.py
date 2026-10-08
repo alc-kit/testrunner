@@ -5,9 +5,16 @@ and colours its output itself; the runner passes those bytes through untouched. 
 matching (expect rules, prompt detection) works on a stripped copy, so a prompt that is
 coloured mid-word still matches its rule.
 
-Colour policy, highest first: --color always|never|auto, NO_COLOR (never), FORCE_COLOR
-(always), else auto = the runner's own output is a terminal. `never` strips the
-children's colour from the echo too. Log files always keep the raw bytes (`less -R`).
+Two separate decisions:
+  the CHILDREN's colour   forwarded raw whenever it is not switched off — `--color never`
+                          or NO_COLOR. Whether the runner's own stdout is a terminal does
+                          NOT matter: a run redirected to a file (an unattended run under a
+                          watcher) keeps its colour; read it with `less -R`.
+                          `--color always` also sets FORCE_COLOR / CLICOLOR_FORCE /
+                          PY_COLORS for tools that colour only when told to.
+  the runner's OWN lines  coloured under `always`, or under `auto` on a terminal.
+Under `never` the children are asked not to colour (NO_COLOR) and what they print anyway
+is stripped. Log files keep exactly what was forwarded.
 """
 from __future__ import annotations
 
@@ -69,12 +76,23 @@ def window_size(stream: TextIO, default: tuple[int, int] = (50, 200)) -> tuple[i
     return default
 
 
-def child_env(color: bool) -> dict[str, str]:
+def forward_colour(mode: str) -> bool:
+    """Do the children's colours reach the operator (and the log)?"""
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    return not os.environ.get("NO_COLOR")
+
+
+def child_env(color: bool, force: bool = False) -> dict[str, str]:
     """Make sure a child that asks "can I colour?" hears yes (or no, under `never`)."""
     env: dict[str, str] = {}
     if color:
         if not os.environ.get("TERM") or os.environ.get("TERM") == "dumb":
             env["TERM"] = "xterm-256color"
+        if force:
+            env.update({"FORCE_COLOR": "1", "CLICOLOR_FORCE": "1", "PY_COLORS": "1"})
     else:
         env["NO_COLOR"] = "1"
     return env

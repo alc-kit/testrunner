@@ -100,12 +100,13 @@ class Proc:
 
     def __init__(self, cwd: Path, log_dir: Path, ui: InputBroker | None = None,
                  echo: TextIO | None = None, env: dict[str, str] | None = None,
-                 prompt_idle: float = DEFAULT_PROMPT_IDLE, color: bool = True,
+                 prompt_idle: float = DEFAULT_PROMPT_IDLE, color: bool = True, force_color: bool = False,
                  prompt_pattern: str = DEFAULT_PROMPT_PATTERN, secrets: Secrets | None = None,
                  nolog: bool = False):
         self.cwd, self.log_dir, self.ui, self.echo = Path(cwd), Path(log_dir), ui, echo
         self.env = env or {}
         self.color = color
+        self.force_color = force_color
         self.prompt_re = re.compile(prompt_pattern)
         self.secrets = secrets or Secrets()
         self.nolog = nolog          # NOLOG action: no output to the log or the terminal
@@ -125,7 +126,7 @@ class Proc:
             if r.nolog:
                 self.secrets.add(r.send.rstrip("\r\n"))
         idle_limit = self.prompt_idle if prompt_idle is None else prompt_idle
-        full_env = {**os.environ, **child_env(self.color), **self.env, **(env or {})}
+        full_env = {**os.environ, **child_env(self.color, self.force_color), **self.env, **(env or {})}
         master, slave = os.openpty()
         rows, cols = window_size(self.echo) if self.echo is not None else (50, 200)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))

@@ -110,3 +110,28 @@ def test_without_the_pattern_it_would_be_killed(tmp_path):
     r = run(Proc(tmp_path, tmp_path, prompt_pattern=r".").run(
         "printf 'Waiting for the domain...'; sleep 1.2; echo done", prompt_idle=0.3, timeout=20))
     assert not r.ok and r.unanswered == "Waiting for the domain..."
+
+
+def test_auto_forwards_child_colour_even_when_redirected(toy, capsys, monkeypatch):
+    # the runner's stdout is NOT a terminal here (captured), yet the child's colour arrives
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    from testrunner.cli import main
+    code = main(["--root", str(toy.root), "--color", "auto", "--non-interactive", "install"])
+    out = capsys.readouterr().out
+    assert code == 0 and "\x1b[32minstalled\x1b[0m" in out
+    assert "\x1b[1;36m====" not in out          # the runner's own banner: plain, not a tty
+    assert "\x1b[32m" in (toy.root / "state/logs/install.log").read_text()
+
+
+def test_never_strips_and_asks_children_not_to_colour(toy, capsys):
+    # negative control for the test above
+    from testrunner.cli import main
+    assert main(["--root", str(toy.root), "--color", "never", "--non-interactive", "install"]) == 0
+    assert "\x1b[" not in capsys.readouterr().out
+
+
+def test_always_tells_children_to_force_colour(tmp_path):
+    r = run(Proc(tmp_path, tmp_path, color=True, force_color=True).run('echo "$FORCE_COLOR/$PY_COLORS"'))
+    assert "1/1" in r.text
+    r = run(Proc(tmp_path, tmp_path, color=True).run('echo "[$FORCE_COLOR]"'))
+    assert "[]" in r.text

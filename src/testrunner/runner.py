@@ -26,7 +26,7 @@ from .planner import Program, Step, Walker, produced, requires_holds, when_holds
 from .proc import DEFAULT_PROMPT_PATTERN, Proc
 from .nolog import Secrets, values_at
 from .store import Store
-from .term import Style, color_enabled
+from .term import Style, color_enabled, forward_colour
 from .ui import InputBroker
 
 BUILTIN_RUN = {"run", "config", "store", "ui", "registry"}
@@ -124,8 +124,9 @@ class Runner:
         self.rc, self.reg, self.run_config, self.store = rc, reg, run_config, store
         self.ui = ui or InputBroker(interactive=False)
         self.echo = echo if echo is not None else sys.stdout
-        self.color = color_enabled(color, self.echo)
-        self.style = Style(self.color)
+        self.style = Style(color_enabled(color, self.echo))   # the runner's own lines
+        self.color = forward_colour(color)                     # the children's colour
+        self.force_color = color == "always"
         self.fixtures = Fixtures(reg.fixtures, BUILTIN_RUN | BUILTIN_STEP)
         self._current_task: asyncio.Task | None = None
         self._aborted = False
@@ -273,7 +274,7 @@ class Runner:
                              "TR_STATE_DIR": str(self.store.root), "TR_PARAMS": json.dumps(params),
                              "TR_CONFIG_FILE": str(self.run_config.file or ""),
                              "TR_WITH": json.dumps(deep_merge(run.program.params, step.with_))},
-                        prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color,
+                        prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color, force_color=self.force_color,
                         prompt_pattern=rc.input.get("prompt_pattern", DEFAULT_PROMPT_PATTERN),
                         secrets=self.secrets, nolog=act.nolog)
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
