@@ -76,7 +76,7 @@ def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None
            produces: Mapping[str, Any] | None = None,
            produces_on: Mapping[str, Mapping[str, Any]] | None = None,
            outcomes: Iterable[str] = (), tags: Iterable[str] = (),
-           readonly: bool = False, nolog: bool = False) -> Callable:
+           readonly: bool = False, nolog: bool = False, doc: str | None = None) -> Callable:
     """Export a function as an action.
 
     requires     state the action must start from: {var: value} or {var: [values]}
@@ -87,6 +87,7 @@ def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None
     readonly     it only looks: it produces no state, and a run of read-only steps may
                  run beside a state-changing run in the same directory
     nolog        NOLOG: the output of the commands it runs is neither logged nor shown
+    doc          the one-line description `--list` shows (default: the docstring's first line)
     """
     def mark(fn: Callable) -> Callable:
         setattr(fn, MARK, ActionMark(
@@ -94,7 +95,8 @@ def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None
             requires=dict(requires or {}), produces=dict(produces or {}),
             produces_on={k: dict(v) for k, v in (produces_on or {}).items()},
             outcomes=tuple(outcomes), tags=tuple(tags), readonly=readonly, nolog=nolog,
-            doc=(fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""))
+            doc=doc if doc is not None else
+            ((fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else "")))
         return fn
     return mark
 

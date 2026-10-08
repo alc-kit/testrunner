@@ -44,3 +44,10 @@ def test_run_start_hook_can_refuse_the_run(sub, capsys):
     code, out = sub.run("x", capsys=capsys)
     assert code == 1 and "refused before the first step: config is invalid" in out
     assert not (sub.root / "state/kv/h/ran.json").exists()
+
+
+def test_action_doc_overrides_the_docstring(sub, capsys):
+    sub.write("testrunner.yml", "modules: [m.py]\nstates: {s: {values: [a], initial: a}}\n")
+    sub.write("m.py", 'from testrunner import action\n@action(doc="short text")\ndef x():\n    """long docstring"""\n')
+    code, out = sub.run("--list", capsys=capsys)
+    assert code == 0 and "short text" in out and "long docstring" not in out
