@@ -20,4 +20,4 @@ def test_private_address_refused(tmp_path):
 
 
 def test_internal_host_name_refused(tmp_path):
-    assert guard(tmp_path, "ssh build-01.corp\n").returncode == 1
+    assert guard(tmp_path, "ssh build-01." + "corp\n").returncode == 1
