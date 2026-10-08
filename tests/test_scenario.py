@@ -141,3 +141,22 @@ def test_joined_scenario_chosen_explicitly_says_so(toy, capsys):
     assert toy.run("how", capsys=capsys)[0] == 0
     got = json.loads((toy.root / "state/kv/t/how.json").read_text())
     assert got["how"] == "--config" and "branchy.yml" in got["scenario"]
+
+
+def test_a_run_is_judged_by_the_observed_state_not_an_empty_store(toy, capsys):
+    # the service exists (built by other tooling), the store never saw it: `start` requires
+    # installed — the observer must say so before the plan is judged
+    sb = toy.root / "state" / "sandbox"
+    sb.mkdir(parents=True)
+    (sb / "service").write_text("installed")
+    code, out = toy.run("start", capsys=capsys)
+    assert code == 0 and "observed service='installed'" in out
+
+
+def test_plan_only_uses_the_store(toy, capsys):
+    # control: --plan does not observe, so the same situation is refused there
+    sb = toy.root / "state" / "sandbox"
+    sb.mkdir(parents=True)
+    (sb / "service").write_text("installed")
+    code, out = toy.run("--plan", "start", capsys=capsys)
+    assert code == 2 and "start: requires" in out

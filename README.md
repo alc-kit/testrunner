@@ -110,7 +110,8 @@ By default the walk is linear: a step that ends as expected continues, anything 
 stops the run and leaves the system as it is. Steps can also carry `when:` (a condition
 on the config) and `max_visits:` (a bound for `goto` loops).
 
-**Before anything runs**, the plan is simulated over every reachable branch: every
+**Before anything runs**, the observers are asked what the system IS (a run, not `--plan`,
+which reads only the store), and the plan is simulated from there over every reachable branch: every
 `requires` must hold, every reaction must name an outcome its action can end with, every
 `expect.state` must be reachable. An impossible plan is refused before the first step.
 

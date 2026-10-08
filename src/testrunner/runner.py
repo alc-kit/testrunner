@@ -166,6 +166,26 @@ class Runner:
         if self._current_task is not None:
             self._current_task.cancel()
 
+    # ── reality before the plan is judged ──
+    async def observe(self, program: Program, state: dict) -> dict:
+        """The state the observers report right now, over `state` (the stored one). Run BEFORE
+        the static plan check, so a system that exists but that this store never saw (built
+        by other tooling, or the store was cleared) is judged by what it IS."""
+        if not self.reg.observers:
+            return state
+        data = deep_merge(self.run_config.data, {self.rc.params_section: program.params})
+        run = RunContext(self.rc, self.run_config, program, self.store)
+        run.state = dict(state)
+        scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui,
+                              "registry": self.reg})
+        out = dict(state)
+        try:
+            for var in self.reg.observers:
+                out[var] = await self._observe(var, scope)
+        finally:
+            await scope.close()
+        return out
+
     # ── the run ──
     async def run(self, program: Program) -> RunResult:
         if self.readonly:

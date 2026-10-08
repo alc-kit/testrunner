@@ -125,7 +125,26 @@ def main(argv: list[str] | None = None) -> int:
                         f"({run_config.file or 'no run config found'})"), file=sys.stderr)
         return EXIT_USAGE
     data = deep_merge(run_config.data, {rc.params_section: prog.params})
-    v = simulate(rc, reg, prog, initial_state(rc, store.get_state()), data)
+    state0 = initial_state(rc, store.get_state())
+    ui = InputBroker(interactive=False if args.non_interactive else None)
+    try:
+        runner = Runner(rc, reg, run_config, store, ui, color=args.color, run_id=run_id,
+                        readonly=readonly, report_formats=formats if args.report else ())
+    except FixtureError as e:
+        print(style.bad(f"ERROR: {e}"), file=sys.stderr)
+        return EXIT_USAGE
+    if not args.plan and reg.observers:
+        # reality first: a system this store never saw is judged by what it IS
+        try:
+            seen = asyncio.run(runner.observe(prog, state0))
+            for var, val in seen.items():
+                if val != state0.get(var):
+                    print(style.dim(f"observed {var}={val!r} (the store said {state0.get(var)!r})"))
+            state0 = seen
+        except Exception as e:  # noqa: BLE001 — an observer that cannot look must not block a run
+            print(style.warn(f"warning: could not observe the current state ({e}); judging the plan "
+                             f"by the stored state"))
+    v = simulate(rc, reg, prog, state0, data)
     src = (f"{run_config.file.name if run_config.file else '(no run config)'} ({run_config.how}"
            + (f"; scenario {run_config.scenario}" if run_config.scenario else "") + ")")
     for n in prog.notes:
@@ -147,13 +166,6 @@ def main(argv: list[str] | None = None) -> int:
         print(style.bad("ERROR: the plan cannot run as written (see above); nothing was started"), file=sys.stderr)
         return EXIT_USAGE
     print(style.banner(f"plan of {src}: {' > '.join(v.walk)}"))
-    ui = InputBroker(interactive=False if args.non_interactive else None)
-    try:
-        runner = Runner(rc, reg, run_config, store, ui, color=args.color, run_id=run_id,
-                        readonly=readonly, report_formats=formats if args.report else ())
-    except FixtureError as e:
-        print(style.bad(f"ERROR: {e}"), file=sys.stderr)
-        return EXIT_USAGE
     try:
         result = asyncio.run(runner.run(prog))
     except LockedError as e:
