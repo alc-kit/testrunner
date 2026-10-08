@@ -186,7 +186,8 @@ input:
   prompt_idle: 20              # seconds of silence mid-line before a prompt is assumed...
   prompt_pattern: '[:?>\]#$]\s*$'   # ...on a line that ends like a prompt
 ```
-`examples/toy/` is a complete subscriber that runs; read it next.
+`examples/toy/` is a complete subscriber that runs; read it next, then
+`docs/writing-actions.md` for how to add an action.
 
 ## Licence
 
