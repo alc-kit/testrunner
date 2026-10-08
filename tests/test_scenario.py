@@ -116,3 +116,28 @@ def test_parallel_claims_have_exactly_one_winner(tmp_path):
     winners = [n for n, (claimed, _) in results if claimed]
     assert len(winners) == 1
     assert {rec["config_file"] for _, (_, rec) in results} == {f"c{winners[0]}"}
+
+
+def _capture_how(toy):
+    toy.write("actions/how.py", """
+        from testrunner import action
+        @action(readonly=True)
+        def how(run, store):
+            store.kv("t").put("how", {"how": run.run_config.how, "scenario": run.run_config.scenario})
+        """)
+
+
+def test_joined_scenario_keeps_how_it_was_selected(toy, capsys):
+    _capture_how(toy)
+    assert toy.run(capsys=capsys)[0] == 0                       # selected by default
+    assert toy.run("how", capsys=capsys)[0] == 0                # a later run joins it
+    got = json.loads((toy.root / "state/kv/t/how.json").read_text())
+    assert got["how"] == "default" and got["scenario"].startswith("default.yml")
+
+
+def test_joined_scenario_chosen_explicitly_says_so(toy, capsys):
+    _capture_how(toy)
+    assert toy.run("-c", "branchy", capsys=capsys)[0] == 0      # selected with --config
+    assert toy.run("how", capsys=capsys)[0] == 0
+    got = json.loads((toy.root / "state/kv/t/how.json").read_text())
+    assert got["how"] == "--config" and "branchy.yml" in got["scenario"]

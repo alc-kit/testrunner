@@ -190,6 +190,10 @@ class RunConfig:
     how: str
     data: dict[str, Any]
     nolog_paths: list[str] = field(default_factory=list)   # dotted paths marked NOLOG
+    # set when this run JOINED a scenario: its description. `how` then stays the way the
+    # scenario's config was ORIGINALLY selected (--config, $ENV, ./link, default), so a
+    # subscriber can still tell a deliberately chosen config from the default one.
+    scenario: str = ""
 
     @property
     def plan(self) -> Any:

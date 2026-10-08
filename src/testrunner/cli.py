@@ -126,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     data = deep_merge(run_config.data, {rc.params_section: prog.params})
     v = simulate(rc, reg, prog, initial_state(rc, store.get_state()), data)
-    src = f"{run_config.file.name if run_config.file else '(no run config)'} ({run_config.how})"
+    src = (f"{run_config.file.name if run_config.file else '(no run config)'} ({run_config.how}"
+           + (f"; scenario {run_config.scenario}" if run_config.scenario else "") + ")")
     for n in prog.notes:
         print(style.dim(f"note: {n}"))
     for w in v.warnings:
