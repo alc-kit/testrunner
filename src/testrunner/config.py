@@ -120,7 +120,8 @@ KNOWN_RUNNER_KEYS = {"modules", "actions", "state_dir", "states", "paths", "defa
 def load_runner_config(path: Path) -> RunnerConfig:
     path = Path(path).resolve()
     data = load_file(path)
-    unknown = set(data) - KNOWN_RUNNER_KEYS
+    # `x-*` keys are free for YAML anchors (the docker-compose convention)
+    unknown = {k for k in data if not str(k).startswith("x-")} - KNOWN_RUNNER_KEYS
     if unknown:
         raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}")
     root = path.parent

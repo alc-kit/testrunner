@@ -234,3 +234,14 @@ def test_transition_map_with_undeclared_value_refused(sub):
     sub.write("mod.py", TMOD.replace('{"absent": "up"}', '{"absent": "booted"}'))
     with pytest.raises(ConfigError, match="'booted'"):
         collect(load_runner_config(sub.root / "testrunner.yml"))
+
+
+def test_nested_lists_splice_and_x_keys_allowed(sub):
+    rc, reg, run = build(sub, "", runner=RUNNER + "x-anchor: &a {}\n")
+    prog = Compiler(rc, reg).compile({"path": ["one", ["two", ["three"]]]})
+    assert [s.id for s in prog.main] == ["one", "two", "three"]
+
+
+def test_other_unknown_runner_keys_still_refused(sub):
+    with pytest.raises(ConfigError, match="unknown key"):
+        build(sub, "", runner=RUNNER + "modulez: []\n")

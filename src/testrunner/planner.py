@@ -12,6 +12,7 @@ Step entry forms (in paths, plan paths, detours and reactions):
   "up..join", "lifecycle:up..join", "..reboot", "up.."   a range over a path
   {action: install, id: install-2, with: {...}, when: {...}, max_visits: 2}
   {stages: [up, ping], with: {...}}    a group sharing `with` (run-config list form)
+  [a, b]                    a nested list, spliced in place
 """
 from __future__ import annotations
 
@@ -114,6 +115,8 @@ class Compiler:
             w = dict(inherited_with or {})
             if isinstance(e, str):
                 out += self._expand_name(e, w, depth, where)
+            elif isinstance(e, list):          # a nested list is spliced in place
+                out += self.expand(e, w, depth + 1, where)
             elif isinstance(e, dict) and "stages" in e:
                 unknown = set(e) - {"stages", "with"}
                 if unknown:
