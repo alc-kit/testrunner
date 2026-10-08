@@ -1,0 +1,9 @@
+# A negative control: verify with the wrong row count MUST fail.
+extends: default
+plan:
+  path: [uninstall, lifecycle]
+  with: {rows: 3}
+  detours:
+    - {after: verify, steps: [{action: verify, id: wrong-rows, with: {rows: 99}}]}
+  expect:
+    wrong-rows: {outcome: failed}

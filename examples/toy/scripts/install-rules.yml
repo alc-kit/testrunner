@@ -1,0 +1,2 @@
+# Matched against the output WITHOUT colour codes, so the coloured prompt still matches.
+- {expect: "Type YES to continue", send: "YES\r", delay: 0.2}

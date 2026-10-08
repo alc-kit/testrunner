@@ -1,0 +1,6 @@
+# The default: the whole lifecycle, in order.
+params:
+  rows: 3
+  sandbox: state/sandbox
+plan:
+  path: lifecycle

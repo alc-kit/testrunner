@@ -1,0 +1,11 @@
+# Detours and outcome-driven branching on the same path.
+extends: default
+plan:
+  path: [uninstall, lifecycle]
+  with: {degrade: true}
+  detours:
+    - {after: start, steps: [{action: verify, id: early-verify, with: {rows: 0}}]}
+  on:
+    seed: {degraded: [repair]}
+  expect:
+    early-verify: {outcome: passed}

@@ -1,0 +1,31 @@
+# A toy subscriber: the "system under test" is a pretend service living in a directory.
+# Everything a real subscriber has is here, small: python and shell exports, a state
+# model, a default path, run configs, an expect rule, an observer.
+modules: [actions/]
+state_dir: state                 # the SUBSCRIBER's state — testrunner keeps none
+params_section: params
+configs: {dir: configs, env: TOY_CONFIG, link: toy.yml}
+
+states:
+  service: {values: [absent, installed, running], initial: absent}
+  data:    {values: [empty, seeded], initial: empty}
+
+paths:
+  lifecycle: [install, start, seed, verify]
+
+# The first state-changing run commits this directory to its run config; it is released
+# when a run leaves the service absent (or by `--release`).
+scenario:
+  release_when: {service: absent}
+
+actions:
+  install:                        # a shell export, with an interactive confirmation
+    doc: install the service (asks for confirmation)
+    run: ["bash", "scripts/install.sh", "{sandbox}"]
+    rules: scripts/install-rules.yml
+    requires: {service: absent}
+    produces: {service: installed}
+  uninstall:
+    doc: remove the service
+    run: "rm -rf '{sandbox}'"
+    produces: {service: absent, data: empty}
