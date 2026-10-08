@@ -28,3 +28,19 @@ def test_hooks_fire_in_order(sub, capsys):
     import json
     assert json.loads((sub.root / "state/kv/h/seen.json").read_text()) == [
         "run_start", "step_start:x", "step_end:passed", "run_end"]
+
+
+def test_run_start_hook_can_refuse_the_run(sub, capsys):
+    sub.write("testrunner.yml", "modules: [m.py]\nstates: {s: {values: [a], initial: a}}\n")
+    sub.write("m.py", """
+        from testrunner import action, hook, OutcomeError
+        @hook("run_start")
+        def no(run):
+            raise OutcomeError("errored", "config is invalid")
+        @action()
+        def x(store):
+            store.kv("h").put("ran", True)
+        """)
+    code, out = sub.run("x", capsys=capsys)
+    assert code == 1 and "refused before the first step: config is invalid" in out
+    assert not (sub.root / "state/kv/h/ran.json").exists()

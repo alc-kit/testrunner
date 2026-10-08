@@ -197,7 +197,14 @@ class Runner:
         try:
             for var in self.reg.observers:
                 state[var] = await self._observe(var, run_scope)
-            await self.hook("run_start", run=run)
+            try:
+                await self.hook("run_start", run=run)
+            except OutcomeError as e:
+                # a run_start hook may refuse the run (an invalid config, a missing tool):
+                # nothing has run yet, and the run fails with the hook's reason
+                result.passed, result.why = False, f"refused before the first step: {e.outcome.detail or e}"
+                self.say(self.style.bad(f"refused before the first step: {e.outcome.detail or e}"))
+                return result
             cur = walker.start()
             visits: dict[str, int] = {}
             index = 0
