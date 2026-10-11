@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
-from .log import env_delta, output_excerpt
+from .log import command_line, env_delta, output_excerpt
 from .nolog import MASK, Secrets
 from .term import Stripper, child_env, strip, window_size
 from .ui import InputBroker, NotInteractive
@@ -109,7 +109,7 @@ class Proc:
                  echo: TextIO | None = None, env: dict[str, str] | None = None,
                  prompt_idle: float = DEFAULT_PROMPT_IDLE, color: bool = True, force_color: bool = False,
                  prompt_pattern: str = DEFAULT_PROMPT_PATTERN, secrets: Secrets | None = None,
-                 nolog: bool = False):
+                 nolog: bool = False, show_command: Callable[[str], None] | None = None):
         self.cwd, self.log_dir, self.ui, self.echo = Path(cwd), Path(log_dir), ui, echo
         self.env = env or {}
         self.color = color
@@ -118,6 +118,8 @@ class Proc:
         self.secrets = secrets or Secrets()
         self.nolog = nolog          # NOLOG action: no output to the log or the terminal
         self.prompt_idle = prompt_idle
+        # --show-commands: called with a copy-pasteable line before every command starts
+        self.show_command = show_command
 
     async def run(self, argv: list[str] | str, *, cwd: Path | None = None,
                   env: dict[str, str] | None = None, log: str | None = None,
@@ -149,6 +151,14 @@ class Proc:
                       env_delta({**self.env, **(env or {})}), self.log_dir / log if log else "-",
                       echo and self.echo is not None, timeout, idle_limit, len(compiled),
                       "" if ask_operator else ", operator NOT asked")
+        if self.show_command is not None:
+            if quiet:
+                line = f"$ {shlex.quote(argv[0])} …   # NOLOG action: its arguments are not shown"
+            else:
+                line = "$ " + command_line(argv, run_cwd, {**self.env, **(env or {})})
+                if not (echo and self.echo is not None):
+                    line += "   # output not shown (see the trace)"
+            self.show_command(self.secrets.text(line))
         t0 = time.monotonic()
         master, slave = os.openpty()
         rows, cols = window_size(self.echo) if self.echo is not None else (50, 200)

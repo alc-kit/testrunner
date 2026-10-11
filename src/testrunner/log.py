@@ -29,6 +29,7 @@ import contextvars
 import logging
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -187,6 +188,28 @@ def output_excerpt(text: str, head: int = OUTPUT_HEAD, tail: int = OUTPUT_TAIL) 
     return "\n".join([*(f"    | {ln}" for ln in lines[:head]),
                       f"    | ... {cut} line(s) not shown ...",
                       *(f"    | {ln}" for ln in lines[-tail:])])
+
+
+# variables testrunner sets on every child for colour; not part of what a command MEANS
+_COLOUR_VARS = {"TERM", "FORCE_COLOR", "CLICOLOR_FORCE", "PY_COLORS", "NO_COLOR"}
+
+
+def command_line(argv: list[str], cwd: Any, env: dict[str, Any] | None) -> str:
+    """One copy-pasteable shell line that reruns a command as testrunner ran it: its
+    directory, the environment it got ON TOP of the runner's own (unset ones as
+    `env -u`), and its argv — everything quoted for a POSIX shell."""
+    unset, assign = [], []
+    for k in sorted(env or {}):
+        if k in _COLOUR_VARS:
+            continue
+        v = env[k]
+        if v is None:
+            if k in os.environ:
+                unset += ["-u", k]
+        elif os.environ.get(k) != str(v):
+            assign.append(f"{k}={shlex.quote(str(v))}")
+    prefix = (["env", *unset] if unset else []) + assign
+    return f"cd {shlex.quote(str(cwd))} && " + " ".join([*prefix, *map(shlex.quote, argv)])
 
 
 def env_delta(env: dict[str, Any] | None) -> str:
