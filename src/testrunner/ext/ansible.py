@@ -18,6 +18,12 @@ Container mode mounts the given paths at the SAME paths inside (configs with abs
 paths resolve unchanged), shares the host network, and forwards every environment
 variable whose name starts with one of `forward_prefixes` — by pattern, so a variable
 the inventory starts reading tomorrow is forwarded without anyone remembering to.
+
+An `env` value of None UNSETS the variable (as in Proc.run) — it never reaches a child
+as the string "None". And a probe that reads the inventory (hostvar, group, host) REFUSES
+when ansible says the inventory did not parse: ansible then falls back to the implicit
+localhost and exits 0, so the probe would otherwise answer "" or [] for a broken
+inventory — a wrong answer that looks exactly like a real one.
 """
 from __future__ import annotations
 
@@ -30,6 +36,24 @@ from typing import Any, Iterable
 
 from ..api import ERRORED, FAILED, OutcomeError
 from ..proc import Proc, Result
+
+
+# What ansible prints when an inventory source did not parse. It still exits 0 (with only
+# the implicit localhost), so these lines are the ONLY sign the answer is not real.
+INVENTORY_BROKEN = re.compile(r"Unable to parse .* as an inventory source|No inventory was parsed|"
+                              r"Failed to parse inventory|Inventory script returned non-zero")
+
+
+class InventoryBroken(OutcomeError):
+    def __init__(self, what: str, output: str):
+        lines = [ln.strip() for ln in output.replace("\r", "").splitlines() if ln.strip()]
+        why = []
+        for i, ln in enumerate(lines):
+            if ln.startswith("Standard error from inventory script") and i + 1 < len(lines):
+                why.append(lines[i + 1])    # the script's own words: usually the real reason
+        why += [ln for ln in lines if INVENTORY_BROKEN.search(ln)]
+        super().__init__(ERRORED, f"{what}: the inventory did not parse, so ansible answered from an "
+                                  f"EMPTY inventory — " + " | ".join(dict.fromkeys(why))[:600])
 
 
 class EmptyScope(OutcomeError):
@@ -71,12 +95,16 @@ class Ansible:
         for k in names:
             if k in self.never_forward:
                 continue
+            if k in self.env and self.env[k] is None:
+                continue                    # unset for this call: nothing to forward
             if k.startswith(self.forward_prefixes):
                 argv += ["-e", k]
         return argv + [self.image, binary]
 
-    def _env(self) -> dict[str, str]:
-        return {k: str(v) for k, v in self.env.items()}
+    def _env(self) -> dict[str, str | None]:
+        # None stays None: Proc.run UNSETS it. str(None) would hand every child "None",
+        # which an inventory reads as a real value (measured 2026-10-11: GATE3_SHAPE=None).
+        return {k: None if v is None else str(v) for k, v in self.env.items()}
 
     async def _run(self, argv: list[str], **kw: Any) -> Result:
         if self.image and self.home:
@@ -140,18 +168,25 @@ class Ansible:
         `ansible-inventory --host`, which returns group_vars untemplated)."""
         r = await self.adhoc("localhost", "debug", f"msg={{{{ hostvars['{host}'].{expression} | default('') }}}}",
                              connection="local")
+        what = f"hostvars[{host!r}].{expression}"
+        self.raise_for(r, what)
+        self.raise_for_inventory(r, what)
         m = re.search(r'"msg":\s*"(.*)"', r.text)
-        return m.group(1) if m else ""
+        if not m:
+            raise OutcomeError(ERRORED, f"{what}: no msg in ansible's answer: {r.text.strip()[-300:]!r}")
+        return m.group(1)
 
     async def inventory_host(self, host: str) -> dict:
         r = await self._run([*self.argv("ansible-inventory"), "-i", self.inventory, "--host", host], echo=False)
         self.raise_for(r, f"ansible-inventory --host {host}")
+        self.raise_for_inventory(r, f"ansible-inventory --host {host}")
         return json.loads(_json_part(r.text))
 
     async def group(self, name: str) -> list[str]:
         """The hosts of a group as the inventory resolves it right now (empty if none)."""
         r = await self._run([*self.argv("ansible-inventory"), "-i", self.inventory, "--list"], echo=False)
         self.raise_for(r, "ansible-inventory --list")
+        self.raise_for_inventory(r, f"group {name!r}")
         data = json.loads(_json_part(r.text))
         out: list[str] = []
 
@@ -182,6 +217,11 @@ class Ansible:
             raise OutcomeError(FAILED, f"{what}: unanswered prompt {r.unanswered!r}")
         if r.returncode != 0:
             raise OutcomeError(FAILED, f"{what}: exit {r.returncode}")
+
+    @staticmethod
+    def raise_for_inventory(r: Result, what: str) -> None:
+        if INVENTORY_BROKEN.search(r.text):
+            raise InventoryBroken(what, r.text)
 
     def describe(self) -> str:
         return shlex.join(self.argv())
