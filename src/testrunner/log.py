@@ -76,7 +76,9 @@ class _Format(logging.Formatter):
         step = getattr(record, "step", "-")
         if self.stamp:
             t = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created))
-            line = f"{t}.{int(record.msecs):03d}Z {record.levelname:<7} [{step}] {name}: {msg}"
+            # file:line — every line in the trace points at the code that wrote it
+            line = (f"{t}.{int(record.msecs):03d}Z {record.levelname:<7} [{step}] {name} "
+                    f"({record.filename}:{record.lineno}): {msg}")
         else:
             line = f"[{record.levelname.lower()} {step} {name}] {msg}"
         # masked at FORMAT time: a line buffered before the run's secrets were known is

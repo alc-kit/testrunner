@@ -186,11 +186,11 @@ testrunner -vv ...          everything (DEBUG)
 testrunner --log-level WARNING ...     or TESTRUNNER_LOG_LEVEL=info in the environment
 ```
 Each line names the step it belongs to — also lines from fixtures, background tasks and
-your own code:
+your own code — and the file:line that wrote it:
 ```
-2026-10-11T14:12:45.120Z INFO    [up] testrunner.runner: up: requires {'rig': 'absent'} against state {'rig': 'absent'} -> holds
-2026-10-11T14:12:47.004Z DEBUG   [up] testrunner.proc: cmd#7 start: ansible -i inventory localhost -m debug ...
-2026-10-11T14:12:48.311Z INFO    [up] testrunner.ext.ansible: hostvars['n1'].backend resolves to 'zfs'
+2026-10-11T14:12:45.120Z INFO    [up] testrunner.runner (runner.py:368): up: requires {'rig': 'absent'} against state {'rig': 'absent'} -> holds
+2026-10-11T14:12:47.004Z DEBUG   [up] testrunner.proc (proc.py:147): cmd#7 start: ansible -i inventory localhost -m debug ...
+2026-10-11T14:12:48.311Z INFO    [up] testrunner.ext.ansible (ansible.py:181): hostvars['n1'].backend resolves to 'zfs'
 ```
 Log from your actions with the standard library — no testrunner API needed:
 ```python
