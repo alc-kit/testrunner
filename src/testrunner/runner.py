@@ -250,12 +250,9 @@ class Runner:
                                   steps=[s.id for s in program.main], state=state, pid=os.getpid(),
                      readonly=self.readonly)
         try:
-            token = STEP.set("(observe)")
-            try:
-                for var in self.reg.observers:
-                    state[var] = await self._observe(var, run_scope)
-            finally:
-                STEP.reset(token)
+            # an observer that cannot look is a warning here (as in the CLI's pre-plan look),
+            # never a crash: the run then starts from the stored state for that variable
+            await self._reobserve(run, run_scope, "(observe)")
             try:
                 await self.hook("run_start", run=run)
             except OutcomeError as e:
@@ -313,9 +310,15 @@ class Runner:
                      f" ({result.why})" if result.why else "", run.state)
             rw = rc.release_when
             if not self.readonly and rw and self.store.get_scenario() is not None:
-                holds = all(run.state.get(k) == v for k, v in rw.items())
+                # judged on what IS, never on the model alone: re-read every observed
+                # variable release_when names; one that cannot be read keeps the scenario
+                blind = await self._reobserve(run, run_scope, "(release)", only=set(rw))
+                holds = not blind and all(run.state.get(k) == v for k, v in rw.items())
                 log.info("scenario.release_when %s against state %s: %s", rw, run.state,
+                         f"cannot observe {sorted(blind)} -> scenario stays" if blind else
                          "holds -> releasing the scenario" if holds else "does not hold -> scenario stays")
+                if blind:
+                    self.say(self.style.warn(f"scenario kept: could not observe {', '.join(sorted(blind))}"))
                 if holds:
                     self.store.release_scenario()
                     self.journal("scenario_released", by="release_when", state=run.state)
@@ -329,6 +332,34 @@ class Runner:
             except Exception as e:  # noqa: BLE001
                 self.say(self.style.warn(f"no report: {e}"))
         return result
+
+    async def _reobserve(self, run: RunContext, scope: Scope, where: str,
+                         only: set[str] | None = None) -> set[str]:
+        """Read every observed variable (or those in `only`) into run.state; reality wins
+        over the model. Returns the variables that could NOT be read — their model value
+        stays, and the caller decides what an unread value may not be trusted for."""
+        blind: set[str] = set()
+        token = STEP.set(where) if where.startswith("(") else None
+        try:
+            for var in self.reg.observers:
+                if only is not None and var not in only:
+                    continue
+                try:
+                    seen = await self._observe(var, scope)
+                except Exception as e:  # noqa: BLE001 — an observer that cannot look is reported, not fatal
+                    log.warning("%s: could not observe %s (%s: %s); keeping the model's %r", where, var,
+                                type(e).__name__, e, run.state.get(var))
+                    blind.add(var)
+                    continue
+                if seen != run.state.get(var):
+                    log.warning("%s: observed %s=%r, the model said %r — reality wins", where, var, seen,
+                                run.state.get(var))
+                    self.say(self.style.warn(f"     observed {var}={seen!r} (the model said {run.state.get(var)!r})"))
+                run.state[var] = seen
+        finally:
+            if token is not None:
+                STEP.reset(token)
+        return blind
 
     async def _observe(self, var: str, scope: Scope) -> Any:
         fn = self.reg.observers[var]
@@ -419,15 +450,11 @@ class Runner:
                  else f"declared: {act.produces if outcome.name == PASSED else act.produces_on.get(outcome.name, {})}",
                  run.state)
         expect = run.program.expected(step.id)
-        if outcome.name not in (ABORTED,):
-            for var in set(changed) | set(expect.state):
-                if var in self.reg.observers:
-                    seen = await self._observe(var, run_scope)
-                    if seen != run.state.get(var):
-                        log.warning("%s: observed %s=%r, the model said %r — reality wins", step.id, var, seen,
-                                    run.state.get(var))
-                        self.say(self.style.warn(f"     observed {var}={seen!r} (the model said {run.state.get(var)!r})"))
-                    run.state[var] = seen
+        # Reality after EVERY step, whatever its outcome: a step that failed (or was
+        # aborted) half-way can still have changed the system — measured 2026-10-11: an
+        # `up` that built every VM and then failed left the model at `absent`, and
+        # release_when then released the scenario over running VMs.
+        await self._reobserve(run, run_scope, step.id)
         if outcome.name == expect.outcome:
             wrong = {k: (v, run.state.get(k)) for k, v in expect.state.items() if run.state.get(k) != v}
             log.debug("%s: expected outcome %s reached; expect.state %s -> %s", step.id, expect.outcome,
