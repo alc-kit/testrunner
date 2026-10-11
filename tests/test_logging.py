@@ -76,7 +76,7 @@ def test_a_run_leaves_a_trace_with_its_decisions(sub, capsys):
     # the walker's decision after each step
     assert "after flip ended passed: verdict ok; next gated" in t
     # the subscriber's own line, tagged with its step, its module name readable
-    assert re.search(r"INFO +\[flip\] m \(m\.py:9\): subscriber decided: flip it", t)
+    assert re.search(r"INFO +\[flip\] m \(m\.py:\d+\): subscriber decided: flip it", t)
 
 
 def test_every_command_is_in_the_trace_start_and_end(sub, capsys):
