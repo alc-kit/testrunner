@@ -158,3 +158,23 @@ def test_group_refuses_an_inventory_that_did_not_parse(tmp_path, bin_dir):
     stub(tmp_path / "bin", "ansible-inventory", BROKEN_INVENTORY + 'echo \'{"all": {"children": []}}\'\n')
     with pytest.raises(OutcomeError, match="did not parse"):
         asyncio.run(ans(tmp_path).group("web"))
+
+
+def test_console_capture_refuses_by_name_when_a_tool_is_missing(tmp_path, monkeypatch):
+    # measured 2026-10-11: no `script` on a Fedora 44 host -> a bare FileNotFoundError
+    # five minutes into `up`; now a named refusal, and a check to run BEFORE building
+    from testrunner.ext import console
+    real_which = console.shutil.which
+    monkeypatch.setattr(console.shutil, "which", lambda t: None if t == "script" else real_which(t))
+    assert [m for m in console.missing_tools() if m.startswith("script")] and \
+        "util-linux-script" in " ".join(console.missing_tools())
+    with pytest.raises(console.ConsoleUnavailable, match="script"):
+        console.ConsoleCapture(tmp_path).start("n1", "dom-uuid")
+    assert not (tmp_path / "n1.pid").exists()
+
+
+def test_console_tools_present_means_nothing_missing(monkeypatch):
+    # negative control: with both tools found, nothing is reported missing
+    from testrunner.ext import console
+    monkeypatch.setattr(console.shutil, "which", lambda t: f"/usr/bin/{t}")
+    assert console.missing_tools() == []

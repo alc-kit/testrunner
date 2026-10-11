@@ -15,12 +15,29 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import signal
 import subprocess
 from pathlib import Path
 
 
 log = logging.getLogger(__name__)
+
+
+# what a capture runs, and where each comes from (measured 2026-10-11: Fedora 44 ships
+# `script` in its own util-linux-script package, not in util-linux)
+TOOLS = {"script": "util-linux (on Fedora: the separate util-linux-script package)",
+         "virsh": "the libvirt client (libvirt-client / libvirt-clients)"}
+
+
+class ConsoleUnavailable(RuntimeError):
+    """A capture cannot start on this host: a tool it runs is not installed."""
+
+
+def missing_tools() -> list[str]:
+    """The tools a capture needs that this host lacks, each with where it comes from.
+    Check this BEFORE building anything: a capture starts after the machines exist."""
+    return [f"{t} — {where}" for t, where in TOOLS.items() if shutil.which(t) is None]
 
 
 class ConsoleCapture:
@@ -43,6 +60,9 @@ class ConsoleCapture:
         if self.running(name):
             log.debug("console %s: a capture already runs", name)
             return False
+        missing = missing_tools()
+        if missing:
+            raise ConsoleUnavailable("serial console capture needs tools this host lacks: " + "; ".join(missing))
         self.log_dir.mkdir(parents=True, exist_ok=True)
         p = subprocess.Popen(
             ["script", "-qfa", "-c", f"virsh -c {self.uri} console --force {domain}",
