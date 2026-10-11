@@ -192,6 +192,16 @@ your own code — and the file:line that wrote it:
 2026-10-11T14:12:47.004Z DEBUG   [up] testrunner.proc (proc.py:147): cmd#7 start: ansible -i inventory localhost -m debug ...
 2026-10-11T14:12:48.311Z INFO    [up] testrunner.ext.ansible (ansible.py:181): hostvars['n1'].backend resolves to 'zfs'
 ```
+To see **how each command was run** — to rerun one by hand, or to show it — add
+`--show-commands` (or set `TESTRUNNER_SHOW_COMMANDS=1`). Before every command starts,
+the terminal gets one line you can paste into a shell: its directory, the environment
+it got on top of yours (`env -u` for a variable it had unset), and its arguments:
+```
+$ cd /srv/rig/automation && env -u RIG_SHAPE RIG_BACKEND=lvm-thin ansible-playbook site.yml -i /srv/rig/inventory --limit n1,n2
+```
+Commands whose output is not shown (the probes) are listed too, marked as such. NOLOG
+values are masked, and a `nolog` action's commands show the program name only.
+
 Log from your actions with the standard library — no testrunner API needed:
 ```python
 import logging
@@ -230,6 +240,7 @@ testrunner --list | --status | --scenario | --select -c NAME | --release | --rep
   --report  --report-format md|html|both
   -c/--config NAME   -w/--with key=value   --color MODE   --non-interactive   --root DIR
   -v | -vv | --log-level LEVEL     testrunner's own log on stderr (the trace file is always written)
+  --show-commands                  every command before it runs, as a copy-pasteable shell line
 ```
 Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).
 

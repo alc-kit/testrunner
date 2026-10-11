@@ -135,7 +135,9 @@ class StateView(dict):
 class Runner:
     def __init__(self, rc: RunnerConfig, reg: Registry, run_config: RunConfig, store: Store,
                  ui: InputBroker | None = None, echo: TextIO | None = None, color: str = "auto",
-                 run_id: str = "", readonly: bool = False, report_formats: tuple[str, ...] = ()):
+                 run_id: str = "", readonly: bool = False, report_formats: tuple[str, ...] = (),
+                 show_commands: bool = False):
+        self.show_commands = show_commands         # --show-commands: each command, copy-pasteable
         self.report_formats = report_formats      # empty: no report (only --report asks for one)
         self.run_id = run_id or uuid.uuid4().hex[:8]
         # A run of read-only steps takes no writer lock and persists no state: it may run
@@ -421,7 +423,8 @@ class Runner:
                              "TR_WITH": json.dumps(deep_merge(run.program.params, step.with_))},
                         prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color, force_color=self.force_color,
                         prompt_pattern=rc.input.get("prompt_pattern", DEFAULT_PROMPT_PATTERN),
-                        secrets=self.secrets, nolog=act.nolog)
+                        secrets=self.secrets, nolog=act.nolog,
+                        show_command=(lambda line: self.say(self.style.dim(line))) if self.show_commands else None)
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
             outcome = await self._execute(act, scope, ctx, step_data)

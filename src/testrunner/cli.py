@@ -12,6 +12,8 @@
   testrunner --report-of RUN      (re)build the report of an earlier run from the journal
   --config NAME|FILE   --with key=value   --color auto|always|never   --root DIR
   -v | -vv | --log-level LEVEL   show testrunner's own log (decisions) on stderr
+  --show-commands      print every command before it runs, as a line you can paste into a
+                       shell (also: TESTRUNNER_SHOW_COMMANDS=1)
 
 Every run and --plan also writes its full DEBUG trace — every decision the runner took,
 every command it started — to <state_dir>/logs/testrunner-<run>.log (log.py).
@@ -79,6 +81,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", metavar="LEVEL",
                    help=f"the stderr log level (DEBUG, INFO, WARNING, ERROR; beats -v and ${ENV_LEVEL}). "
                         "The trace file is always DEBUG")
+    p.add_argument("--show-commands", action="store_true",
+                   default=os.environ.get("TESTRUNNER_SHOW_COMMANDS", "").lower() in ("1", "true", "yes", "on"),
+                   help="print every command before it runs, as a copy-pasteable shell line "
+                        "(cd + environment + argv; also TESTRUNNER_SHOW_COMMANDS=1)")
     p.add_argument("--version", action="version", version=f"testrunner {__version__}")
     return p
 
@@ -209,7 +215,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
     ui = InputBroker(interactive=False if args.non_interactive else None)
     try:
         runner = Runner(rc, reg, run_config, store, ui, color=args.color, run_id=run_id,
-                        readonly=readonly, report_formats=formats if args.report else ())
+                        readonly=readonly, report_formats=formats if args.report else (),
+                        show_commands=args.show_commands)
     except FixtureError as e:
         log.error("refused before anything ran: %s", e)
         print(style.bad(f"ERROR: {e}"), file=sys.stderr)
