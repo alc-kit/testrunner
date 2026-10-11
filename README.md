@@ -164,6 +164,44 @@ Both are built from the journal alone, so any past run can be reported afterward
 action or a `step_end` hook can add its own numbers with `step.metric("tasks", 779)`;
 they are recorded in the journal and shown in both formats.
 
+## Debugging a run: the trace
+
+The terminal shows what a run **did**. The trace shows what testrunner **decided** and why:
+which run config it chose and how, `when:` key by key (the value the config holds against
+the one the step wants), `requires` against the current state, what each outcome
+produced, what observers read, which way the walker went, every fixture set up, and
+every command started — argv, cwd, the environment it got on top of the runner's own,
+exit code, duration — with the output of commands whose output went nowhere else (the
+silent probes whose answers decide what happens next).
+
+Every run, `--plan`, `--select` and `--release` writes one, at DEBUG, whatever the terminal shows:
+```
+<state_dir>/logs/testrunner-<run id>.log     (testrunner-last.log points at the newest; 50 kept)
+```
+Its path is printed with the plan banner and again when a run fails. To see the same log
+on the terminal (stderr) as it happens:
+```
+testrunner -v  ...          decisions and milestones (INFO)
+testrunner -vv ...          everything (DEBUG)
+testrunner --log-level WARNING ...     or TESTRUNNER_LOG_LEVEL=info in the environment
+```
+Each line names the step it belongs to — also lines from fixtures, background tasks and
+your own code:
+```
+2026-10-11T14:12:45.120Z INFO    [up] testrunner.runner: up: requires {'rig': 'absent'} against state {'rig': 'absent'} -> holds
+2026-10-11T14:12:47.004Z DEBUG   [up] testrunner.proc: cmd#7 start: ansible -i inventory localhost -m debug ...
+2026-10-11T14:12:48.311Z INFO    [up] testrunner.ext.ansible: hostvars['n1'].backend resolves to 'zfs'
+```
+Log from your actions with the standard library — no testrunner API needed:
+```python
+import logging
+log = logging.getLogger(__name__)
+log.info("3 of 4 nodes answer; skipping the fourth: %s", reason)
+```
+NOLOG values are masked in the trace too, and a `nolog` action's commands are logged
+by program name only (no arguments, environment or output). Logging never changes a
+run: a broken log call is reported by Python's logging and the step goes on.
+
 ## NOLOG: values that must not be logged
 
 Nothing is treated as secret unless it is **marked**. A marked value is replaced by
@@ -191,6 +229,7 @@ testrunner --plan [steps]        validate and print the walk; run nothing
 testrunner --list | --status | --scenario | --select -c NAME | --release | --report-of RUN
   --report  --report-format md|html|both
   -c/--config NAME   -w/--with key=value   --color MODE   --non-interactive   --root DIR
+  -v | -vv | --log-level LEVEL     testrunner's own log on stderr (the trace file is always written)
 ```
 Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).
 
