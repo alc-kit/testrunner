@@ -20,7 +20,9 @@ variable whose name starts with one of `forward_prefixes` — by pattern, so a v
 the inventory starts reading tomorrow is forwarded without anyone remembering to.
 
 An `env` value of None UNSETS the variable (as in Proc.run) — it never reaches a child
-as the string "None". And a probe that reads the inventory (hostvar, group, host) REFUSES
+as the string "None". In container mode it is still forwarded BY NAME (`-e VAR`, no
+value): the engine passes nothing for a variable its own environment lacks, and a
+subscriber can assert that everything its inventory reads is named. And a probe that reads the inventory (hostvar, group, host) REFUSES
 when ansible says the inventory did not parse: ansible then falls back to the implicit
 localhost and exits 0, so the probe would otherwise answer "" or [] for a broken
 inventory — a wrong answer that looks exactly like a real one.
@@ -100,8 +102,6 @@ class Ansible:
         for k in names:
             if k in self.never_forward:
                 continue
-            if k in self.env and self.env[k] is None:
-                continue                    # unset for this call: nothing to forward
             if k.startswith(self.forward_prefixes):
                 argv += ["-e", k]
         return argv + [self.image, binary]

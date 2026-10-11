@@ -118,10 +118,12 @@ def test_none_in_env_unsets_and_never_becomes_the_string_none(tmp_path, bin_dir,
     a = ans(tmp_path, env={"TR_X": None, "TR_X_INHERITED": None, "TR_Y": "y"})
     r = asyncio.run(a.adhoc("localhost", "ping"))
     assert "X=<unset> I=<unset>" in r.text
-    # container mode: a None is not forwarded either
+    # container mode: forwarded by NAME only (the engine passes nothing for an unset one),
+    # never as a value
     c = ans(tmp_path, env={"ANSIBLE_GONE": None, "ANSIBLE_KEPT": "1"}, image="img")
     argv = c.argv("ansible")
-    assert "ANSIBLE_KEPT" in argv and "ANSIBLE_GONE" not in argv
+    assert "ANSIBLE_KEPT" in argv and "ANSIBLE_GONE" in argv
+    assert not any(a.startswith("ANSIBLE_GONE=") or a == "None" for a in argv)
 
 
 BROKEN_INVENTORY = r'''echo "[WARNING]: Failed to parse inventory with 'script' plugin: Inventory script returned non-zero exit code 1."
