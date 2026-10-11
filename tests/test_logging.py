@@ -216,3 +216,34 @@ def test_the_run_is_the_same_at_every_log_level(sub, capsys, level):
     assert code == 0
     assert lines == ["---- flip: passed (Ts)", "---- gated: skipped (when)", "---- sh-ok: passed (Ts)",
                      "  passed   flip", "  skipped  gated", "  passed   sh-ok", "==== PASSED ===="]
+
+
+def test_null_env_in_a_shell_action_unsets_and_a_null_parameter_is_refused(sub, capsys, monkeypatch):
+    # the same class as the ansible "None" bug: YAML null must never become the word None
+    monkeypatch.setenv("TR_GONE", "inherited")
+    sub.write("testrunner.yml", """
+modules: []
+actions:
+  envy:
+    run: 'echo "gone=${{TR_GONE-<unset>}}" > out.txt'
+    env: {TR_GONE: ~}
+  argy:
+    run: ["echo", "{target}"]
+""")
+    sub.write("configs/default.yml", "params: {target: ~}\n")
+    assert sub.run("envy", capsys=capsys)[0] == 0
+    assert (sub.root / "out.txt").read_text().strip() == "gone=<unset>"
+    code, out = sub.run("argy", capsys=capsys)
+    assert code == 1 and "null" in out and "'None'" in out
+
+
+def test_a_when_key_the_config_does_not_have_is_warned(sub, capsys):
+    make(sub)
+    sub.write("configs/default.yml", CONFIG.replace("params.flavour: fancy", "params.flavor: fancy"))
+    sub.run(capsys=capsys)
+    assert re.search(r"WARNING .*gated: when names \['params.flavor'\], which the run config does not contain", trace(sub))
+    # negative control: the correctly spelt key gives no warning
+    fresh(sub)
+    sub.write("configs/default.yml", CONFIG)
+    sub.run(capsys=capsys)
+    assert "does not contain at all" not in trace(sub)

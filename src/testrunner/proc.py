@@ -234,8 +234,10 @@ class Proc:
 
         async def _send(text: str, delay: float) -> None:
             await asyncio.sleep(delay)
-            with contextlib.suppress(OSError):
+            try:
                 os.write(master, text.encode())
+            except OSError as e:     # the child is gone, or closed its terminal
+                logger.warning("cmd#%d: could not send a rule's answer: %s", seq, e)
             if logf_out:
                 shown = MASK if text.rstrip("\r\n") in self.secrets.values else self.secrets.text(text)
                 logf_out.write(f"\n[testrunner: sent {shown!r}]\n".encode())
@@ -269,8 +271,10 @@ class Proc:
                     return
                 logger.debug("cmd#%d: the operator answered", seq)
                 scanned = len(plain)
-                with contextlib.suppress(OSError):
+                try:
                     os.write(master, (answer + "\r").encode())
+                except OSError as e:
+                    logger.warning("cmd#%d: could not send the operator's answer: %s", seq, e)
 
         loop.add_reader(master, readable)
         watcher = asyncio.ensure_future(watch_prompts())

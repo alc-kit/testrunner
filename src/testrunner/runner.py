@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import string
 import sys
 import time
 import traceback
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, TextIO
 
 from .api import (ABORTED, ERRORED, FAILED, PASSED, SKIPPED, Outcome, OutcomeError)
-from .config import RunConfig, RunnerConfig, deep_merge
+from .config import RunConfig, RunnerConfig, deep_merge, lookup
 from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
 from .planner import Program, Step, Walker, produced, requires_holds, when_explained, when_holds
@@ -33,6 +34,7 @@ from .term import Style, color_enabled, forward_colour
 from .ui import InputBroker
 
 log = logging.getLogger(__name__)
+_ABSENT = object()
 
 BUILTIN_RUN = {"run", "config", "store", "ui", "registry"}
 BUILTIN_STEP = {"step", "params", "proc", "state"}
@@ -352,6 +354,11 @@ class Runner:
         log.debug("%s: params %s", step.id, params)
         if step.when:
             log.info("%s: when — %s", step.id, "; ".join(when_explained(step.when, step_data)))
+            absent = [k for k in step.when if lookup(step_data, k, _ABSENT) is _ABSENT]
+            if absent:
+                # a typo here skips the step forever while the run passes: say so loudly
+                log.warning("%s: when names %s, which the run config does not contain at all — compared "
+                            "as None (a typo, or a key the config never sets?)", step.id, absent)
         if not when_holds(step.when, step_data):
             log.info("%s: skipped — when does not hold", step.id)
             sr = StepResult(step.id, act.name, SKIPPED, "when: does not hold", state=dict(run.state))
@@ -503,7 +510,8 @@ class Runner:
         fmt = _Format(params)
         run = spec["run"]
         argv = [fmt(w) for w in run] if isinstance(run, list) else ["bash", "-c", fmt(run)]
-        env = {k: fmt(str(v)) for k, v in (spec.get("env") or {}).items()}
+        # a null value UNSETS the variable (as in Proc.run) — never the string "None"
+        env = {k: None if v is None else fmt(str(v)) for k, v in (spec.get("env") or {}).items()}
         cwd = self.rc.root / fmt(spec["cwd"]) if spec.get("cwd") else self.rc.root
         rules = spec.get("rules")
         if isinstance(rules, str):
@@ -548,14 +556,30 @@ def _where(e: BaseException) -> str:
     return "".join(traceback.format_tb(e.__traceback__)[-3:]).rstrip()
 
 
+class _NullParameter(Exception):
+    pass
+
+
+class _Formatter(string.Formatter):
+    def format_field(self, value: Any, format_spec: str) -> Any:
+        if value is None:
+            raise _NullParameter()
+        return super().format_field(value, format_spec)
+
+
 class _Format:
-    """`{name}` in shell argv/env, from the step's params; `{a[b]}` reaches nested ones."""
+    """`{name}` in shell argv/env, from the step's params; `{a[b]}` reaches nested ones.
+    A parameter that is null (unset in the config) is REFUSED: it would reach the command
+    as the word "None", which no command means."""
 
     def __init__(self, params: dict):
         self.params = params
 
     def __call__(self, text: str) -> str:
         try:
-            return str(text).format_map(self.params)
+            return _Formatter().vformat(str(text), (), self.params)
         except (KeyError, IndexError) as e:
             raise OutcomeError(ERRORED, f"{text!r}: no parameter {e}") from None
+        except _NullParameter:
+            raise OutcomeError(ERRORED, f"{text!r}: a parameter it names is null (unset in the run "
+                                        f"config) — refusing to pass the word 'None'") from None
