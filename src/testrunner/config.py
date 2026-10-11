@@ -121,6 +121,9 @@ class RunnerConfig:
     input: dict[str, Any] = field(default_factory=dict)
     release_when: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    # the subscriber's `run_config` hooks (collect() fills it): they see every run config
+    # as it loads, before anything is planned from it
+    config_hooks: list = field(default_factory=list)
 
 
 def find_runner_config(start: Path) -> Path:
@@ -239,7 +242,7 @@ def resolve_config_file(rc: RunnerConfig, name: str | None) -> tuple[Path | None
 def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
     file, how = resolve_config_file(rc, name)
     if file is None:
-        return RunConfig(None, how, {})
+        return RunConfig(None, how, apply_config_hooks(rc, {}, how, None, []))
     seen: list[Path] = []
 
     def load(p: Path) -> dict:
@@ -280,7 +283,48 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
     data, nolog_paths = unwrap(data)
     log.info("loaded run config %s (%s)%s", file, how,
              f"; NOLOG at {nolog_paths}" if nolog_paths else "")
-    return RunConfig(file, how, data, nolog_paths)
+    return RunConfig(file, how, apply_config_hooks(rc, data, how, file, nolog_paths), nolog_paths)
+
+
+def _leaves(data: Any, prefix: str = "") -> dict[str, Any]:
+    if not isinstance(data, dict) or not data:
+        return {prefix: data} if prefix else {}
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        out.update(_leaves(v, f"{prefix}.{k}" if prefix else str(k)))
+    return out
+
+
+def apply_config_hooks(rc: RunnerConfig, data: dict, how: str, file: Path | None,
+                       nolog_paths: list[str]) -> dict:
+    """The `run_config` hooks, in place, as the run config loads: whatever plans from this
+    config (a step's `when:`, the scenario snapshot) then sees what the hooks made of it —
+    e.g. a value the subscriber takes from the environment. Every changed key is logged."""
+    from .fixtures import accepted   # here: fixtures -> discovery -> config is a cycle
+    for fn in rc.config_hooks:
+        before = _leaves(copy.deepcopy(data))
+        kwargs = accepted(fn, {"config": data, "how": how, "file": file, "root": rc.root})
+        name = getattr(fn, "__qualname__", str(fn))
+        try:
+            fn(**kwargs)
+        except ConfigError:
+            raise
+        except Exception as e:
+            log.debug("run_config hook %s raised %s: %s", name, type(e).__name__, e, exc_info=True)
+            detail = getattr(getattr(e, "outcome", None), "detail", "") or str(e)
+            raise ConfigError(f"run_config hook {name} refused {file or 'the run config'}: {detail}") from e
+        after = _leaves(data)
+        changed = sorted(k for k in before.keys() | after.keys() if before.get(k, _NONE) != after.get(k, _NONE))
+        for k in changed:
+            masked = any(k == p or k.startswith(p + ".") for p in nolog_paths)
+            log.info("run_config hook %s: %s %r -> %r", name, k,
+                     "<NOLOG>" if masked else before.get(k), "<NOLOG>" if masked else after.get(k))
+        if not changed:
+            log.debug("run_config hook %s: changed nothing", name)
+    return data
+
+
+_NONE = object()
 
 
 def parse_with(items: list[str]) -> dict[str, Any]:
