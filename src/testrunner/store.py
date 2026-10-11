@@ -19,12 +19,16 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+
+log = logging.getLogger(__name__)
 
 
 def utcnow() -> str:
@@ -68,9 +72,11 @@ class KV:
             return default
 
     def put(self, key: str, value: Any) -> None:
+        log.debug("kv %s/%s written", self.root.name, key)
         atomic_write(self._file(key), json.dumps(value, indent=2, sort_keys=True) + "\n")
 
     def delete(self, key: str) -> None:
+        log.debug("kv %s/%s deleted", self.root.name, key)
         with contextlib.suppress(FileNotFoundError):
             self._file(key).unlink()
 
@@ -148,6 +154,7 @@ class Store:
 
     def release_scenario(self) -> dict | None:
         old = self.get_scenario()
+        log.info("scenario released (was %s)", old.get("config_file") if old else None)
         with contextlib.suppress(FileNotFoundError):
             (self.root / self.SCENARIO).unlink()
         return old
@@ -171,9 +178,12 @@ class Store:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 holder = os.read(fd, 200).decode(errors="replace").strip()
+                log.error("writer lock %s/.lock is held: %s", self.root, holder or "unknown holder")
                 raise LockedError(f"another run holds {self.root}/.lock ({holder or 'unknown holder'})") from None
             os.ftruncate(fd, 0)
             os.write(fd, f"pid {os.getpid()} since {utcnow()}\n".encode())
+            log.debug("writer lock %s/.lock taken", self.root)
             yield
         finally:
             os.close(fd)   # releases the flock
+            log.debug("writer lock %s/.lock released", self.root)

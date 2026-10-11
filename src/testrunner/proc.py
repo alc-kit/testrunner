@@ -16,9 +16,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import itertools
 import json
+import logging
 import os
 import re
+import shlex
 import signal
 import struct
 import termios
@@ -27,9 +30,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
+from .log import env_delta, output_excerpt
 from .nolog import MASK, Secrets
 from .term import Stripper, child_env, strip, window_size
 from .ui import InputBroker, NotInteractive
+
+logger = logging.getLogger(__name__)   # not `log`: run() takes a log= file name
+_SEQ = itertools.count(1)       # pairs a command's start and end lines in the trace
 
 DEFAULT_DELAY = 1.5
 DEFAULT_PROMPT_IDLE = 20.0
@@ -130,6 +137,19 @@ class Proc:
         # a None value UNSETS the variable (an inherited one too): "false" can mean "absent"
         merged = {**os.environ, **child_env(self.color, self.force_color), **self.env, **(env or {})}
         full_env = {k: str(v) for k, v in merged.items() if v is not None}
+        seq = next(_SEQ)
+        run_cwd = cwd or self.cwd
+        if quiet:
+            # NOLOG: the command line may carry the secret; only the program is named
+            logger.debug("cmd#%d start: %s <NOLOG: arguments, environment and output not logged> (cwd %s)",
+                      seq, argv[0], run_cwd)
+        else:
+            logger.debug("cmd#%d start: %s\n    cwd %s\n    env %s\n    log %s, echo %s, timeout %s, "
+                      "prompt_idle %ss, %d expect rule(s)%s", seq, shlex.join(argv), run_cwd,
+                      env_delta({**self.env, **(env or {})}), self.log_dir / log if log else "-",
+                      echo and self.echo is not None, timeout, idle_limit, len(compiled),
+                      "" if ask_operator else ", operator NOT asked")
+        t0 = time.monotonic()
         master, slave = os.openpty()
         rows, cols = window_size(self.echo) if self.echo is not None else (50, 200)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -143,13 +163,15 @@ class Proc:
             proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=str(cwd or self.cwd), env=full_env,
                 stdin=slave, stdout=slave, stderr=slave, preexec_fn=_child_setup)
-        except BaseException:
+        except BaseException as e:
+            logger.debug("cmd#%d could not start %s: %s: %s", seq, argv[0], type(e).__name__, e)
             os.close(master)
             os.close(slave)
             if logf:
                 logf.close()
             raise
         os.close(slave)
+        logger.debug("cmd#%d pid %d", seq, proc.pid)
         loop = asyncio.get_running_loop()
         out = bytearray()          # raw bytes, forwarded and logged as they came
         plain = bytearray()        # the same without escape sequences: rules and prompts match here
@@ -206,12 +228,16 @@ class Proc:
                 _, end, rule = min(hits, key=lambda h: h[0])
                 scanned = end
                 answered.append(rule.expect.pattern.decode(errors="replace"))
+                logger.debug("cmd#%d rule %r matched; answering in %.1fs with %s", seq, answered[-1], rule.delay,
+                          "<NOLOG>" if rule.nolog else repr(self.secrets.text(rule.send)))
                 sends.append(asyncio.ensure_future(_send(rule.send, rule.delay)))
 
         async def _send(text: str, delay: float) -> None:
             await asyncio.sleep(delay)
-            with contextlib.suppress(OSError):
+            try:
                 os.write(master, text.encode())
+            except OSError as e:     # the child is gone, or closed its terminal
+                logger.warning("cmd#%d: could not send a rule's answer: %s", seq, e)
             if logf_out:
                 shown = MASK if text.rstrip("\r\n") in self.secrets.values else self.secrets.text(text)
                 logf_out.write(f"\n[testrunner: sent {shown!r}]\n".encode())
@@ -229,18 +255,26 @@ class Proc:
                 if not tail or not self.prompt_re.search(tail):
                     continue
                 if self.ui is None or not self.ui.interactive or not ask_operator:
+                    logger.warning("cmd#%d: prompt %r unanswered for %ss and no rule matches; nobody may be "
+                                "asked (%s) -> killing it", seq, tail, idle_limit,
+                                "operator not asked for this command" if not ask_operator else "not interactive")
                     unanswered = tail
                     _kill(proc)
                     return
+                logger.info("cmd#%d: prompt %r unanswered for %ss -> asking the operator", seq, tail, idle_limit)
                 try:
                     answer = await self.ui.ask(f"[{argv[0]}] {tail}")
                 except NotInteractive:
+                    logger.warning("cmd#%d: the operator cannot be asked -> killing it", seq)
                     unanswered = tail
                     _kill(proc)
                     return
+                logger.debug("cmd#%d: the operator answered", seq)
                 scanned = len(plain)
-                with contextlib.suppress(OSError):
+                try:
                     os.write(master, (answer + "\r").encode())
+                except OSError as e:
+                    logger.warning("cmd#%d: could not send the operator's answer: %s", seq, e)
 
         loop.add_reader(master, readable)
         watcher = asyncio.ensure_future(watch_prompts())
@@ -249,11 +283,16 @@ class Proc:
             try:
                 await asyncio.wait_for(proc.wait(), timeout)
             except asyncio.TimeoutError:
+                logger.warning("cmd#%d: timed out after %ss -> stopping its session", seq, timeout)
                 timed_out = True
                 await _stop(proc)
-            with contextlib.suppress(asyncio.TimeoutError):
+            try:
                 await asyncio.wait_for(eof.wait(), 5)
+            except asyncio.TimeoutError:
+                # a grandchild still holds the terminal: the output may be incomplete
+                logger.debug("cmd#%d: exited, but its terminal stayed open 5s longer (a background child?)", seq)
         except asyncio.CancelledError:
+            logger.warning("cmd#%d: cancelled -> stopping its session", seq)
             await _stop(proc)
             raise
         finally:
@@ -276,8 +315,31 @@ class Proc:
                         echo_to.flush()
             if logf:
                 logf.close()
-        return Result(argv, proc.returncode if proc.returncode is not None else -1, bytes(out),
-                      answered, timed_out, unanswered)
+        result = Result(argv, proc.returncode if proc.returncode is not None else -1, bytes(out),
+                        answered, timed_out, unanswered)
+        _log_end(seq, argv, result, time.monotonic() - t0, shown=echo_to is not None or bool(logf_out),
+                 quiet=quiet, secrets=self.secrets)
+        return result
+
+
+def _log_end(seq: int, argv: list[str], r: Result, seconds: float, shown: bool, quiet: bool,
+             secrets: Secrets) -> None:
+    how = ("timed out" if r.timed_out else f"unanswered prompt {r.unanswered!r}" if r.unanswered is not None
+           else f"exit {r.returncode}")
+    level = logging.DEBUG if r.ok else logging.INFO
+    if not logger.isEnabledFor(level):
+        return
+    extra = f", rules fired {r.answered}" if r.answered else ""
+    if quiet:
+        logger.log(level, "cmd#%d end: %s %s after %.2fs%s", seq, argv[0], how, seconds, extra)
+    elif shown:
+        logger.log(level, "cmd#%d end: %s %s after %.2fs, %d bytes of output (in its log / on the terminal)%s",
+                seq, argv[0], how, seconds, len(r.output), extra)
+    else:
+        # the command's output went NOWHERE else: a probe whose answer decides what happens
+        # next. Keep it here, or nobody can ever see why it decided what it did.
+        logger.log(level, "cmd#%d end: %s %s after %.2fs%s; its output (not shown anywhere else):\n%s",
+                seq, argv[0], how, seconds, extra, secrets.text(output_excerpt(r.text)) or "    | (none)")
 
 
 def _kill(proc: asyncio.subprocess.Process) -> None:

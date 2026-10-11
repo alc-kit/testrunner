@@ -11,6 +11,10 @@
   testrunner --report [steps]     run, then write a test report (markdown; --report-format)
   testrunner --report-of RUN      (re)build the report of an earlier run from the journal
   --config NAME|FILE   --with key=value   --color auto|always|never   --root DIR
+  -v | -vv | --log-level LEVEL   show testrunner's own log (decisions) on stderr
+
+Every run and --plan also writes its full DEBUG trace — every decision the runner took,
+every command it started — to <state_dir>/logs/testrunner-<run>.log (log.py).
 
 The first state-changing run in a directory selects its SCENARIO (the resolved run
 config); every later or parallel runner there adheres to it — see scenario.py.
@@ -19,6 +23,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import os
+import platform
+import shlex
 import sys
 from pathlib import Path
 
@@ -27,6 +35,8 @@ from .config import (ConfigError, deep_merge, find_runner_config, load_run_confi
                      load_runner_config, parse_with)
 from .discovery import collect
 from .fixtures import FixtureError
+from .log import ENV_LEVEL, Logs, level_of
+from .nolog import Secrets, values_at
 from .planner import Compiler, initial_state, simulate
 from .runner import Runner
 from .scenario import describe, new_run_id, select
@@ -35,6 +45,8 @@ from .term import Style, color_enabled
 from .ui import InputBroker
 
 EXIT_FAILED, EXIT_USAGE = 1, 2
+
+log = logging.getLogger(__name__)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -62,16 +74,67 @@ def parser() -> argparse.ArgumentParser:
                    help="write a test report for this run when it ends (only then is one written)")
     p.add_argument("--report-format", default="md", metavar="md|html|both",
                    help="the report's format (default: md)")
+    p.add_argument("--verbose", "-v", action="count", default=0,
+                   help="show testrunner's own log on stderr: -v decisions (INFO), -vv detail (DEBUG)")
+    p.add_argument("--log-level", metavar="LEVEL",
+                   help=f"the stderr log level (DEBUG, INFO, WARNING, ERROR; beats -v and ${ENV_LEVEL}). "
+                        "The trace file is always DEBUG")
     p.add_argument("--version", action="version", version=f"testrunner {__version__}")
     return p
+
+
+def terminal_level(args: argparse.Namespace) -> int | None:
+    """--log-level > -v/-vv > $TESTRUNNER_LOG_LEVEL > off."""
+    if args.log_level:
+        return level_of(args.log_level)
+    if args.verbose:
+        return logging.DEBUG if args.verbose > 1 else logging.INFO
+    return level_of(os.environ.get(ENV_LEVEL))
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     style = Style(color_enabled(args.color, sys.stdout))
     try:
-        rc = load_runner_config(find_runner_config(args.root))
+        level = terminal_level(args)
+    except ValueError as e:
+        print(style.bad(f"ERROR: {e}"), file=sys.stderr)
+        return EXIT_USAGE
+    logs = Logs(level)
+    try:
+        code = _main(args, style, logs)
+        log.info("exit %d", code)
+        return code
+    except BaseException as e:
+        if not isinstance(e, (SystemExit, KeyboardInterrupt)):
+            log.exception("testrunner stopped on an unexpected error")
+            if logs.file:
+                print(style.dim(f"trace: {logs.file}"), file=sys.stderr)
+        raise
+    finally:
+        logs.close()
+
+
+def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
+    log.info("testrunner %s, python %s, pid %d, cwd %s", __version__, platform.python_version(),
+             os.getpid(), Path.cwd())
+    log.debug("argv: %s", shlex.join(sys.argv))
+    log.debug("parsed: %s", {k: v for k, v in vars(args).items() if v not in (None, False, [], 0)})
+    run_id = new_run_id()
+    try:
+        found = find_runner_config(args.root)
+        log.info("runner config %s (searched from %s)", found, args.root)
+        rc = load_runner_config(found)
+        log.debug("runner config: root %s, state_dir %s, modules %s, pythonpath %s, states %s, "
+                  "paths %s, default_path %s, configs %s (env %s, link %s, default %s)",
+                  rc.root, rc.state_dir, [str(m) for m in rc.modules], [str(p) for p in rc.pythonpath],
+                  {k: v["values"] for k, v in rc.states.items()}, list(rc.paths), rc.default_path,
+                  rc.configs_dir, rc.config_env, rc.config_link, rc.default_config)
         store = Store(rc.state_dir)
+        if not (args.status or args.scenario or args.list or args.report_of is not None):
+            # everything that runs, plans, selects or releases leaves a trace
+            trace = logs.open_file(store.root / "logs", run_id)
+            log.info("run id %s; this trace: %s", run_id, trace)
         if args.status:
             return status(store, style)
         if args.scenario:
@@ -96,7 +159,6 @@ def main(argv: list[str] | None = None) -> int:
         reg = collect(rc)
         if args.list:
             return listing(rc, reg)
-        run_id = new_run_id()
         if args.select:
             sel = select(rc, store, args.config, claim=True, run_id=run_id)
             for n in sel.notes:
@@ -105,19 +167,36 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         compiler = Compiler(rc, reg)
         with_ = parse_with(args.with_)
+        if with_:
+            log.info("--with for this run: %s", with_)
         sel = select(rc, store, args.config, claim=False, run_id=run_id)
+        logs.secrets = Secrets(values_at(sel.run_config.data, sel.run_config.nolog_paths))
         prog = compiler.compile(sel.run_config.plan, args.steps or None, with_)
         readonly = all(reg.actions[s.action].readonly for s in prog.steps())
+        log.info("%s: %s", "read-only run (no writer lock, no state written)" if readonly
+                 else "state-changing run", ", ".join(f"{s.id}={reg.actions[s.action].kind}"
+                                                      f"{'/ro' if reg.actions[s.action].readonly else ''}"
+                                                      for s in prog.main) or "no steps")
         if sel.scenario is None and not args.plan and not readonly and prog.main:
+            log.info("no scenario in force and this run changes state: selecting one")
             sel = select(rc, store, args.config, claim=True, run_id=run_id)
             if not sel.claimed:    # a parallel runner selected first: compile against ITS config
+                log.warning("a parallel runner selected the scenario first; recompiling against %s",
+                            describe(sel.scenario))
                 prog = compiler.compile(sel.run_config.plan, args.steps or None, with_)
+        elif sel.scenario is None:
+            log.info("no scenario selected and none claimed (%s)",
+                     "--plan" if args.plan else "read-only" if readonly else "nothing to run")
         run_config = sel.run_config
+        logs.secrets = Secrets(values_at(run_config.data, run_config.nolog_paths))
+        log.info("run config %s (chosen by %s)%s", run_config.file or "(none)", run_config.how,
+                 f"; joined scenario {run_config.scenario}" if run_config.scenario else "")
         for n in sel.notes:
             print(style.warn(f"warning: {n}"))
         if sel.claimed:
             print(style.dim(f"scenario selected: {describe(sel.scenario)}"))
     except (ConfigError, FixtureError) as e:
+        log.error("refused before anything ran: %s", e)
         print(style.bad(f"ERROR: {e}"), file=sys.stderr)
         return EXIT_USAGE
     if not prog.main:
@@ -126,25 +205,33 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     data = deep_merge(run_config.data, {rc.params_section: prog.params})
     state0 = initial_state(rc, store.get_state())
+    log.info("state from the store: %s -> starting from %s", store.get_state() or "{}", state0)
     ui = InputBroker(interactive=False if args.non_interactive else None)
     try:
         runner = Runner(rc, reg, run_config, store, ui, color=args.color, run_id=run_id,
                         readonly=readonly, report_formats=formats if args.report else ())
     except FixtureError as e:
+        log.error("refused before anything ran: %s", e)
         print(style.bad(f"ERROR: {e}"), file=sys.stderr)
         return EXIT_USAGE
+    logs.secrets = runner.secrets          # one object: run.nolog() values are masked here too
     if not args.plan and reg.observers:
         # reality first: a system this store never saw is judged by what it IS
+        log.info("observing reality before the plan is judged: %s", ", ".join(reg.observers))
         try:
             seen = asyncio.run(runner.observe(prog, state0))
+            log.info("observed %s", seen)
             for var, val in seen.items():
                 if val != state0.get(var):
                     print(style.dim(f"observed {var}={val!r} (the store said {state0.get(var)!r})"))
             state0 = seen
         except Exception as e:  # noqa: BLE001 — an observer that cannot look must not block a run
+            log.warning("observing failed; the plan is judged by the stored state", exc_info=True)
             print(style.warn(f"warning: could not observe the current state ({e}); judging the plan "
                              f"by the stored state"))
     v = simulate(rc, reg, prog, state0, data)
+    log.info("static check from %s: walk %s; %d error(s), %d warning(s)", state0, " > ".join(v.walk),
+             len(v.errors), len(v.warnings))
     src = (f"{run_config.file.name if run_config.file else '(no run config)'} ({run_config.how}"
            + (f"; scenario {run_config.scenario}" if run_config.scenario else "") + ")")
     for n in prog.notes:
@@ -163,18 +250,32 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"       on {sid} {outcome}: {r.kind}{' ' + tgt if tgt else ''}")
         return EXIT_USAGE if v.errors else 0
     if v.errors:
+        log.error("the static check refused the plan: %s", "; ".join(v.errors))
         print(style.bad("ERROR: the plan cannot run as written (see above); nothing was started"), file=sys.stderr)
         return EXIT_USAGE
     print(style.banner(f"plan of {src}: {' > '.join(v.walk)}"))
+    if logs.file:
+        print(style.dim(f"trace: {_rel(logs.file)}  (every decision; -v/-vv shows it here)"))
     try:
         result = asyncio.run(runner.run(prog))
     except LockedError as e:
+        log.error("%s", e)
         print(style.bad(f"ERROR: {e}"), file=sys.stderr)
         return EXIT_USAGE
     except KeyboardInterrupt:
+        log.warning("interrupted (Ctrl-C)")
         print(style.bad("interrupted"), file=sys.stderr)
         return 130
+    if not result.passed and logs.file:
+        print(style.dim(f"trace of this run (every decision, every command): {_rel(logs.file)}"))
     return 0 if result.passed else EXIT_FAILED
+
+
+def _rel(p: Path) -> str:
+    try:
+        return str(p.relative_to(Path.cwd()))
+    except ValueError:
+        return str(p)
 
 
 def release(store: Store, style: Style) -> int:

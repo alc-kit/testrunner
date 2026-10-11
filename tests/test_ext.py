@@ -109,3 +109,52 @@ def test_vagrant_up_never_runs_bare(tmp_path, bin_dir):
 
 def test_parse_machine_readable_ignores_other_lines():
     assert parse_machine_readable("x\n1,a,state,running\r\n1,a,provider-name,libvirt\n1,,state,x\n") == {"a": "running"}
+
+
+def test_none_in_env_unsets_and_never_becomes_the_string_none(tmp_path, bin_dir, monkeypatch):
+    # measured 2026-10-11: a config's unset value reached the inventory as "None"
+    monkeypatch.setenv("TR_X_INHERITED", "from-the-shell")
+    stub(tmp_path / "bin", "ansible", 'printf "%s\\n" "X=${TR_X-<unset>} I=${TR_X_INHERITED-<unset>}"\n')
+    a = ans(tmp_path, env={"TR_X": None, "TR_X_INHERITED": None, "TR_Y": "y"})
+    r = asyncio.run(a.adhoc("localhost", "ping"))
+    assert "X=<unset> I=<unset>" in r.text
+    # container mode: forwarded by NAME only (the engine passes nothing for an unset one),
+    # never as a value
+    c = ans(tmp_path, env={"ANSIBLE_GONE": None, "ANSIBLE_KEPT": "1"}, image="img")
+    argv = c.argv("ansible")
+    assert "ANSIBLE_KEPT" in argv and "ANSIBLE_GONE" in argv
+    assert not any(a.startswith("ANSIBLE_GONE=") or a == "None" for a in argv)
+
+
+BROKEN_INVENTORY = r'''echo "[WARNING]: Failed to parse inventory with 'script' plugin: Inventory script returned non-zero exit code 1."
+echo "Standard error from inventory script:"
+echo "inv: SHAPE=None: nodes.yml declares no such shape"
+echo "[WARNING]: No inventory was parsed, only implicit localhost is available"
+'''
+
+
+def test_hostvar_refuses_an_inventory_that_did_not_parse(tmp_path, bin_dir):
+    # ansible exits 0 with an empty inventory: the probe must not answer "" as if real
+    stub(tmp_path / "bin", "ansible", BROKEN_INVENTORY + 'echo \'localhost | SUCCESS => {\'; echo \'    "msg": ""\'; echo "}"\n')
+    with pytest.raises(OutcomeError, match="did not parse.*declares no such shape"):
+        asyncio.run(ans(tmp_path).hostvar("n1", "backend"))
+
+
+def test_hostvar_answers_from_a_healthy_inventory(tmp_path, bin_dir):
+    # negative control: same stub shape, no inventory warning -> the value, and "" for undefined
+    stub(tmp_path / "bin", "ansible", 'echo \'localhost | SUCCESS => {\'; echo \'    "msg": "zfs"\'; echo "}"\n')
+    assert asyncio.run(ans(tmp_path).hostvar("n1", "backend")) == "zfs"
+    stub(tmp_path / "bin", "ansible", 'echo \'localhost | SUCCESS => {\'; echo \'    "msg": ""\'; echo "}"\n')
+    assert asyncio.run(ans(tmp_path).hostvar("n1", "backend")) == ""
+
+
+def test_hostvar_refuses_a_failed_probe(tmp_path, bin_dir, monkeypatch):
+    monkeypatch.setenv("STUB_RC", "4")
+    with pytest.raises(OutcomeError, match="exit 4"):
+        asyncio.run(ans(tmp_path).hostvar("n1", "backend"))
+
+
+def test_group_refuses_an_inventory_that_did_not_parse(tmp_path, bin_dir):
+    stub(tmp_path / "bin", "ansible-inventory", BROKEN_INVENTORY + 'echo \'{"all": {"children": []}}\'\n')
+    with pytest.raises(OutcomeError, match="did not parse"):
+        asyncio.run(ans(tmp_path).group("web"))

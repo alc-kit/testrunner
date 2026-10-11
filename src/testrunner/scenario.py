@@ -13,6 +13,7 @@ state the runner config names in `scenario.release_when` (e.g. the system torn d
 """
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -20,6 +21,9 @@ from pathlib import Path
 
 from .config import ConfigError, RunConfig, RunnerConfig, load_run_config, resolve_config_file
 from .store import Store, utcnow
+
+
+log = logging.getLogger(__name__)
 
 
 class ScenarioError(ConfigError):
@@ -53,6 +57,8 @@ def explicit_choice(rc: RunnerConfig, name: str | None) -> str | None:
 
 def adhere(rc: RunnerConfig, rec: dict, choice: str | None) -> Selection:
     file = Path(rec["config_file"]) if rec.get("config_file") else None
+    log.info("a scenario is in force: %s; this run %s", describe(rec),
+             f"asks for {choice!r} explicitly" if choice is not None else "makes no explicit choice -> joins it")
     if choice is not None:
         chosen, how = resolve_config_file(rc, choice)
         if chosen is None or file is None or chosen.resolve() != file.resolve():
@@ -67,6 +73,8 @@ def adhere(rc: RunnerConfig, rec: dict, choice: str | None) -> Selection:
             fresh = load_run_config(rc, str(file)).data
         except ConfigError:
             fresh = None
+        log.debug("scenario snapshot vs %s on disk: %s", file.name,
+                  "same" if fresh == rec["data"] else "unreadable" if fresh is None else "CHANGED")
         if fresh != rec["data"]:
             sel.notes.append(f"{file.name} changed since the scenario was selected; "
                              f"the scenario's snapshot applies (--release to pick up the change)")
@@ -80,6 +88,7 @@ def select(rc: RunnerConfig, store: Store, name: str | None, claim: bool, run_id
         return adhere(rc, rec, choice)
     run_config = load_run_config(rc, name)
     if not claim:
+        log.debug("no scenario in force; %s resolved, not claimed (yet)", run_config.file)
         return Selection(run_config, None)
     record = {"config_file": str(run_config.file) if run_config.file else None,
               "how": run_config.how, "data": run_config.data,
@@ -89,6 +98,8 @@ def select(rc: RunnerConfig, store: Store, name: str | None, claim: bool, run_id
               "selected_at": utcnow(), "run_id": run_id, "pid": os.getpid()}
     claimed, rec = store.claim_scenario(record)
     if not claimed:      # a parallel runner won the race: join ITS scenario
+        log.warning("claiming the scenario lost a race to %s", describe(rec))
         return adhere(rc, rec, choice)
+    log.info("scenario claimed: %s", describe(rec))
     store.journal.append("scenario_selected", run=run_id, config=record["config_file"])
     return Selection(run_config, rec, claimed=True)

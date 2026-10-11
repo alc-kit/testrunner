@@ -53,6 +53,14 @@ Rules of thumb:
 - **Run long side jobs with `step.spawn()`**, for example a probe that must keep running
   while the action works. Use `wait=True, fatal=True` if its failure should fail the step.
 - **Return outcomes the plan can react to.** Raise only for real failures.
+- **Log every decision your action takes** with `log = logging.getLogger(__name__)`:
+  INFO for each branch taken and why ("2 of 3 nodes exist; joining only those"), DEBUG for
+  the detail behind it, WARNING for what an operator should read even on a pass. The
+  lines land in the run's trace tagged with the step (README, "Debugging a run"). The
+  commands you start through `proc` are logged for you — say why you started them.
+- **Never turn a failed probe into an answer.** A helper that returns `""`, `[]` or
+  `None` when its command failed hands the caller a wrong answer that looks like a real
+  one. Check `r.ok` (or use the ext helpers, which raise) and refuse by name.
 
 ## 3. Put it on a path
 

@@ -13,10 +13,14 @@ enforce it.
 """
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
 from pathlib import Path
+
+
+log = logging.getLogger(__name__)
 
 
 class ConsoleCapture:
@@ -37,6 +41,7 @@ class ConsoleCapture:
     def start(self, name: str, domain: str) -> bool:
         """Start capturing `domain` into <log_dir>/<name>.log; False if one already runs."""
         if self.running(name):
+            log.debug("console %s: a capture already runs", name)
             return False
         self.log_dir.mkdir(parents=True, exist_ok=True)
         p = subprocess.Popen(
@@ -45,6 +50,7 @@ class ConsoleCapture:
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True)
         self._pidfile(name).write_text(f"{p.pid}\n")
+        log.info("console %s: capturing domain %s into %s (pid %d)", name, domain, self.log_dir / f"{name}.log", p.pid)
         return True
 
     def stop_all(self) -> list[str]:
@@ -52,8 +58,9 @@ class ConsoleCapture:
         for pidf in sorted(self.log_dir.glob("*.pid")):
             try:
                 os.killpg(int(pidf.read_text().strip()), signal.SIGTERM)
-            except (ValueError, ProcessLookupError, PermissionError):
-                pass
+            except (ValueError, ProcessLookupError, PermissionError) as e:
+                log.debug("console %s: stop: %s (already gone?)", pidf.stem, e)
             pidf.unlink(missing_ok=True)
             stopped.append(pidf.stem)
+        log.info("console captures stopped: %s", stopped or "none were running")
         return stopped

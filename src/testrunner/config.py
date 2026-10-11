@@ -9,6 +9,7 @@ Two kinds of file:
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -34,6 +35,8 @@ if yaml is not None:
         return NoLog(loader.construct_mapping(node, deep=True))
 
     _Loader.add_constructor("!NOLOG", _nolog)
+
+log = logging.getLogger(__name__)
 
 EXTENSIONS = (".yml", ".yaml", ".toml")
 RUNNER_FILES = ("testrunner.yml", "testrunner.yaml", "testrunner.toml")
@@ -214,15 +217,22 @@ def resolve_config_file(rc: RunnerConfig, name: str | None) -> tuple[Path | None
         raise ConfigError(f"no run config {n!r} in {rc.configs_dir} (or local/), and no such file")
 
     if name:
+        log.debug("run config: --config %r given", name)
         return by_name(name), "--config"
     if rc.config_env and os.environ.get(rc.config_env):
+        log.debug("run config: no --config; $%s=%r", rc.config_env, os.environ[rc.config_env])
         return by_name(os.environ[rc.config_env]), f"${rc.config_env}"
     if rc.config_link and (rc.root / rc.config_link).exists():
+        log.debug("run config: no --config%s; link %s -> %s", f", ${rc.config_env} unset" if rc.config_env else "",
+                  rc.root / rc.config_link, (rc.root / rc.config_link).resolve())
         return (rc.root / rc.config_link).resolve(), f"./{rc.config_link}"
     for ext in EXTENSIONS:
         cand = rc.configs_dir / f"{rc.default_config}{ext}"
         if cand.is_file():
+            log.debug("run config: no --config%s%s; the default %s", f", ${rc.config_env} unset" if rc.config_env else "",
+                      f", no ./{rc.config_link}" if rc.config_link else "", cand)
             return cand, "default"
+    log.debug("run config: none (no --config, env, link or %s/%s.*)", rc.configs_dir, rc.default_config)
     return None, "none"
 
 
@@ -254,6 +264,7 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
                 break
         if cand is None:
             raise ConfigError(f"{p}: extends {parent!r}, which does not exist")
+        log.debug("%s extends %s", p.name, cand)
         base = load(cand)
         merged = deep_merge(base, data)
         # A plan is a whole: a child that states one replaces the parent's.
@@ -267,6 +278,8 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
         # YAML 1.1 reads a bare `on:` key as the boolean true (as in GitHub Actions files)
         data["plan"] = {("on" if k is True else k): v for k, v in plan.items()}
     data, nolog_paths = unwrap(data)
+    log.info("loaded run config %s (%s)%s", file, how,
+             f"; NOLOG at {nolog_paths}" if nolog_paths else "")
     return RunConfig(file, how, data, nolog_paths)
 
 

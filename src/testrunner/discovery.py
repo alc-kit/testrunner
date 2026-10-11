@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,9 @@ from typing import Any, Callable
 
 from .api import (BUILTIN_OUTCOMES, MARK, ActionMark, FixtureMark, HookMark, ObserverMark)
 from .config import ConfigError, RunnerConfig
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -102,12 +106,15 @@ def collect(rc: RunnerConfig) -> Registry:
             raise ConfigError(f"pythonpath entry {p} is not a directory")
         if str(p) not in sys.path:
             sys.path.insert(0, str(p))
+            log.debug("pythonpath: %s put first on sys.path", p)
     reg = Registry()
     seen: set[int] = set()
     for entry in rc.modules:
         for f in _module_files(entry):
             plain = f.parent.resolve() in {p.resolve() for p in rc.pythonpath}
             module = _import_plain(f) if plain else _import(f)
+            log.debug("imported %s as %s (%s)", f, module.__name__,
+                      "its real name: a pythonpath directory" if plain else "isolated name")
             for obj in vars(module).values():
                 mark = getattr(obj, MARK, None)
                 if mark is None or id(obj) in seen:
@@ -118,6 +125,14 @@ def collect(rc: RunnerConfig) -> Registry:
     for name, spec in rc.shell_actions.items():
         _register_shell(reg, name, spec, rc)
     validate_registry(reg, rc)
+    log.info("exports: %d action(s), %d fixture(s), observers %s, hooks %s", len(reg.actions), len(reg.fixtures),
+             list(reg.observers), {k: len(v) for k, v in reg.hooks.items()})
+    for a in reg.actions.values():
+        log.debug("  action %s [%s] %s: requires %s, produces %s, produces_on %s, outcomes %s%s%s", a.name, a.kind,
+                  a.source, a.requires, a.produces, a.produces_on, list(a.outcomes),
+                  ", readonly" if a.readonly else "", ", NOLOG" if a.nolog else "")
+    for f in reg.fixtures.values():
+        log.debug("  fixture %s (scope %s) %s", f.name, f.scope, f.source)
     return reg
 
 
