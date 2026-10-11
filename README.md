@@ -88,6 +88,12 @@ def service_state(api): return api.status()
 **Hooks**: `run_start`, `step_start`, `step_end`, `run_end` — `@hook("step_end")`; a
 hook receives only the arguments it names (`run`, `step`, `result`).
 
+`run_config` runs earlier, as each run config LOADS and before anything is planned from
+it: a plain (not async) function that may change `config` in place, given `how` (how the
+config was chosen), `file` and `root`. A step's `when:` and the scenario snapshot then see
+what it made of the config — e.g. a value the subscriber takes from the environment. Every
+key it changes is logged (NOLOG values masked); an exception refuses the run.
+
 ## Plans
 
 A run config names a path, plus anything that changes how it is walked:

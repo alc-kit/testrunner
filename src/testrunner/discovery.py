@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import logging
 import sys
 from dataclasses import dataclass, field
@@ -125,6 +126,7 @@ def collect(rc: RunnerConfig) -> Registry:
     for name, spec in rc.shell_actions.items():
         _register_shell(reg, name, spec, rc)
     validate_registry(reg, rc)
+    rc.config_hooks = list(reg.hooks.get("run_config", []))
     log.info("exports: %d action(s), %d fixture(s), observers %s, hooks %s", len(reg.actions), len(reg.fixtures),
              list(reg.observers), {k: len(v) for k, v in reg.hooks.items()})
     for a in reg.actions.values():
@@ -153,6 +155,9 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
             raise ConfigError(f"two observers for state {mark.var!r}")
         reg.observers[mark.var] = obj
     elif isinstance(mark, HookMark):
+        if mark.name == "run_config" and inspect.iscoroutinefunction(obj):
+            # it runs as the config LOADS, outside any event loop
+            raise ConfigError(f"hook run_config must be a plain function, not async: {where}")
         reg.hooks.setdefault(mark.name, []).append(obj)
 
 

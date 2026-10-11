@@ -16,6 +16,7 @@ PASSED, FAILED, SKIPPED, ERRORED, ABORTED = "passed", "failed", "skipped", "erro
 BUILTIN_OUTCOMES = frozenset({PASSED, FAILED, SKIPPED, ERRORED, ABORTED})
 
 HOOKS = frozenset({
+    "run_config",  # (config, how, file, root) — SYNCHRONOUS; as a run config loads, before any plan
     "run_start",   # (run)
     "step_start",  # (run, step)
     "step_end",    # (run, step, result)
