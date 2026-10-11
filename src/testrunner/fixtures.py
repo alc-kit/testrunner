@@ -11,9 +11,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import logging
+import time
 from typing import Any, Callable
 
 from .discovery import FixtureSpec
+
+
+log = logging.getLogger(__name__)
 
 
 class FixtureError(Exception):
@@ -34,6 +39,8 @@ class Scope:
         return False, None
 
     async def close(self) -> None:
+        log.debug("scope %s closing: tearing down %s", self.name,
+                  [k for k in self.values if k in getattr(self, "fixtures_set_up", ())] or "no exported fixtures")
         await self.stack.aclose()
 
 
@@ -54,6 +61,7 @@ class Fixtures:
                 if pname in self.specs:
                     value = await self._get(pname, scope, chain)
                 elif p.default is not p.empty:
+                    log.debug("%s(%s): no fixture of that name -> its default", _name(fn), pname)
                     continue
                 else:
                     raise FixtureError(f"{getattr(fn, '__name__', fn)}: no fixture named {pname!r}")
@@ -74,8 +82,19 @@ class Fixtures:
             return value
         # A run-scoped fixture is set up in the RUN scope, so it cannot see step values.
         kwargs = await self.kwargs_for(spec.fn, target, (*chain, name))
-        value = await self._setup(spec.fn, kwargs, target)
+        log.debug("fixture %s (scope %s, %s): setting up with %s", name, spec.scope, spec.source,
+                  ", ".join(kwargs) or "no arguments")
+        t = time.monotonic()
+        try:
+            value = await self._setup(spec.fn, kwargs, target)
+        except BaseException as e:
+            log.debug("fixture %s: setup raised %s: %s", name, type(e).__name__, e)
+            raise
+        log.debug("fixture %s: ready (%s, %.2fs)", name, type(value).__name__, time.monotonic() - t)
         target.values[name] = value
+        if not hasattr(target, "fixtures_set_up"):
+            target.fixtures_set_up = []
+        target.fixtures_set_up.append(name)
         return value
 
     @staticmethod
@@ -94,6 +113,10 @@ async def call(fn: Callable, kwargs: dict) -> Any:
     if inspect.iscoroutinefunction(fn):
         return await fn(**kwargs)
     return await asyncio.to_thread(fn, **kwargs)
+
+
+def _name(fn: Callable) -> str:
+    return getattr(fn, "__qualname__", None) or str(fn)
 
 
 def accepted(fn: Callable, available: dict[str, Any]) -> dict[str, Any]:

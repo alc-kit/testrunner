@@ -23,7 +23,7 @@ from .api import (ABORTED, ERRORED, FAILED, PASSED, SKIPPED, Outcome, OutcomeErr
 from .config import RunConfig, RunnerConfig, deep_merge
 from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
-from .planner import Program, Step, Walker, produced, requires_holds, when_holds
+from .planner import Program, Step, Walker, produced, requires_holds, when_explained, when_holds
 from .proc import DEFAULT_PROMPT_PATTERN, Proc
 from . import report
 from .log import STEP
@@ -350,8 +350,10 @@ class Runner:
         log.info("step %s (#%d): action %s [%s, from %s]; with %s", step.id, index, act.name, act.kind,
                  act.source, step.with_ or "{}")
         log.debug("%s: params %s", step.id, params)
+        if step.when:
+            log.info("%s: when — %s", step.id, "; ".join(when_explained(step.when, step_data)))
         if not when_holds(step.when, step_data):
-            log.info("%s: skipped — when %s does not hold", step.id, step.when)
+            log.info("%s: skipped — when does not hold", step.id)
             sr = StepResult(step.id, act.name, SKIPPED, "when: does not hold", state=dict(run.state))
             self.say(self.style.dim(f"---- {step.id}: skipped (when)"))
             self.journal("step_skip", step=step.id, action=act.name, why="when")

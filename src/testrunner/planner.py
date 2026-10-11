@@ -16,12 +16,15 @@ Step entry forms (in paths, plan paths, detours and reactions):
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .api import PASSED, SKIPPED
 from .config import ConfigError, RunnerConfig, deep_merge, lookup
 from .discovery import ActionSpec, Registry
+
+log = logging.getLogger(__name__)
 
 MAIN = "main"
 REACTION_WORDS = ("continue", "stop")
@@ -139,12 +142,19 @@ class Compiler:
         if ".." in name:
             return self._expand_range(name, w, depth, where)
         if name in self.rc.paths:
-            return self.expand(self.rc.paths[name], w, depth + 1, f"paths.{name}")
+            out = self.expand(self.rc.paths[name], w, depth + 1, f"paths.{name}")
+            log.debug("%s: path %r -> %s", where, name, [s["id"] or s["action"] for s in out])
+            return out
         if name in self.reg.actions:
             return [{"action": name, "id": None, "with": w, "when": None, "max_visits": 1}]
         raise ConfigError(f"{where}: {name!r} is neither an action nor a path")
 
     def _expand_range(self, spec: str, w: dict, depth: int, where: str) -> list[dict]:
+        out = self._expand_range_(spec, w, depth, where)
+        log.debug("%s: range %r -> %s", where, spec, [s["id"] or s["action"] for s in out])
+        return out
+
+    def _expand_range_(self, spec: str, w: dict, depth: int, where: str) -> list[dict]:
         path_name, _, rng = spec.rpartition(":")
         path_name = path_name or self.rc.default_path
         if not path_name:
@@ -179,6 +189,8 @@ class Compiler:
             raise ConfigError(f"plan: unknown key(s) {', '.join(sorted(unknown))}")
         adhoc = bool(cli_steps)
         path = cli_steps if adhoc else plan.get("path")
+        log.info("compiling %s: %s", "the steps given on the command line" if adhoc else "the run config's plan",
+                 path)
         if path is None:
             path = []
         params = deep_merge(plan.get("with") or {}, cli_with or {})
@@ -207,6 +219,8 @@ class Compiler:
             new = make(self.expand(d["steps"], where=where))
             pos = idx + 1 if "after" in d else idx
             main[pos:pos] = new
+            log.info("%s: %s spliced %s %s", where, [s.id for s in new], "after" if "after" in d else "before",
+                     anchor)
         segments = {MAIN: main}
         reactions: dict[str, dict[str, Reaction]] = {}
         for sid, by_outcome in (plan.get("on") or {}).items():
@@ -232,6 +246,18 @@ class Compiler:
             expect[sid] = Expect(e.get("outcome", PASSED), dict(e.get("state") or {}))
         prog = Program(segments, reactions, expect, params, notes)
         self._check_references(prog, adhoc)
+        log.info("compiled: main %s", [f"{s.id}" + (f"(={s.action})" if s.action != s.id else "") for s in prog.main])
+        for s in prog.steps():
+            if s.with_ or s.when or s.max_visits != 1:
+                log.debug("  step %s: with %s, when %s, max_visits %d", s.id, s.with_, s.when, s.max_visits)
+        for sid, by in prog.reactions.items():
+            log.info("  on %s: %s", sid, {o: (r.kind, r.target or r.segment) for o, r in by.items()})
+        for sid, e in prog.expect.items():
+            log.info("  expect %s: outcome %s, state %s", sid, e.outcome, e.state)
+        if params:
+            log.info("  plan parameters (plan with + --with): %s", params)
+        for n in notes:
+            log.info("  note: %s", n)
         return prog
 
     def _check_references(self, prog: Program, adhoc: bool) -> None:
@@ -281,6 +307,16 @@ def when_holds(when: dict | None, data: dict) -> bool:
         elif have != want:
             return False
     return True
+
+
+def when_explained(when: dict | None, data: dict) -> list[str]:
+    """`when` key by key — what the config holds against what the step wants (for the trace)."""
+    out = []
+    for key, want in (when or {}).items():
+        have = lookup(data, key)
+        ok = when_holds({key: want}, data)
+        out.append(f"{key}: have {have!r}, want {want!r} -> {'yes' if ok else 'NO'}")
+    return out
 
 
 def requires_holds(requires: dict, state: dict) -> tuple[bool, list[str]]:

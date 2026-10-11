@@ -10,11 +10,14 @@ state is `not_created` does not exist; anything else does.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterable
 
 from ..api import FAILED, OutcomeError
 from ..proc import Proc, Result
+
+logger = logging.getLogger(__name__)   # not `log`: methods take a log= file name
 
 NOT_CREATED = "not_created"
 
@@ -42,13 +45,20 @@ class Vagrant:
         r = await self._run("status", "--machine-readable", echo=False)
         if r.returncode != 0:
             raise OutcomeError(FAILED, "`vagrant status` failed — cannot tell which machines exist")
-        return parse_machine_readable(r.text)
+        states = parse_machine_readable(r.text)
+        logger.info("vagrant status: %s", states or "NO machines (is this the Vagrantfile's directory?)")
+        return states
 
     async def existing(self, among: Iterable[str] | None = None) -> list[str]:
         """Machines that exist (any state but not_created), in `among`'s order if given."""
         states = await self.status()
         names = list(among) if among is not None else list(states)
-        return [n for n in names if states.get(n, NOT_CREATED) != NOT_CREATED]
+        out = [n for n in names if states.get(n, NOT_CREATED) != NOT_CREATED]
+        unknown = [n for n in names if n not in states]
+        if unknown:
+            logger.warning("vagrant does not know %s (counted as not existing)", unknown)
+        logger.debug("existing among %s: %s", names, out)
+        return out
 
     async def up(self, machines: list[str], *, provider: str | None = None, parallel: bool = True,
                  log: str | None = None) -> Result:
@@ -60,12 +70,15 @@ class Vagrant:
             args.append("--no-parallel")
         if provider:
             args.append(f"--provider={provider}")
+        logger.info("vagrant up %s (provider %s, %s)", machines, provider or "default",
+                    "parallel" if parallel else "one at a time")
         r = await self._run(*args, *machines, log=log)
         if r.returncode != 0:
             raise OutcomeError(FAILED, f"vagrant up {' '.join(machines)}: exit {r.returncode}")
         return r
 
     async def destroy(self, machines: list[str] | None = None, *, log: str | None = None) -> Result:
+        logger.info("vagrant destroy %s", machines or "ALL machines")
         r = await self._run("destroy", "-f", *(machines or []), log=log)
         if r.returncode != 0:
             raise OutcomeError(FAILED, f"vagrant destroy: exit {r.returncode}")
