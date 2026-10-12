@@ -456,8 +456,12 @@ class Runner:
         # Reality after EVERY step, whatever its outcome: a step that failed (or was
         # aborted) half-way can still have changed the system — measured 2026-10-11: an
         # `up` that built every VM and then failed left the model at `absent`, and
-        # release_when then released the scenario over running VMs.
-        await self._reobserve(run, run_scope, step.id)
+        # release_when then released the scenario over running VMs. A read-only action
+        # only looks (it may produce no state), so there is nothing to re-read after it.
+        if act.readonly:
+            log.debug("%s: read-only action: reality not re-read after it", step.id)
+        else:
+            await self._reobserve(run, run_scope, step.id)
         if outcome.name == expect.outcome:
             wrong = {k: (v, run.state.get(k)) for k, v in expect.state.items() if run.state.get(k) != v}
             log.debug("%s: expected outcome %s reached; expect.state %s -> %s", step.id, expect.outcome,
