@@ -36,6 +36,7 @@ inside a plan or path: there it would mean the plan itself.
 from __future__ import annotations
 
 import copy
+import itertools
 import logging
 import re
 from dataclasses import dataclass, field
@@ -50,7 +51,7 @@ log = logging.getLogger(__name__)
 MAIN = "main"
 REACTION_WORDS = ("continue", "stop")
 EDIT_OPS = {"repeat": {"after", "before", "id"}, "insert": {"after", "before"}, "skip": set(), "replace": {"by"},
-            "retry": {"times", "delay", "if", "unless"}}
+            "retry": {"times", "delay", "if", "unless"}, "transition": {"rules"}}
 RETRY_KEYS = {"times", "delay", "if", "unless"}
 EVIDENCE_KEYS = {"outcome", "detail", "output", "state", "probe"}
 DEFAULT_RETRY_ON = ["failed", "errored"]
@@ -106,6 +107,16 @@ class Reaction:
 
 
 @dataclass
+class Rule:
+    """One transition rule: when the step ends with one of `outcomes` (None: any) and the
+    observed state matches `state`, `reaction` decides what comes next."""
+    outcomes: list[str] | None
+    state: dict[str, Any]
+    reaction: Reaction
+    text: str = ""
+
+
+@dataclass
 class Expect:
     outcome: str = PASSED
     state: dict[str, Any] = field(default_factory=dict)
@@ -120,6 +131,8 @@ class Program:
     notes: list[str] = field(default_factory=list)
     # where the main path came from, for people: "plan of x.yml", "all = path full: ...", ...
     source: str = ""
+    # transition RULES (on: <step>: [ {when, then} ... ]): first match wins, none -> stop, failed
+    rules: dict[str, list[Rule]] = field(default_factory=dict)
 
     @property
     def main(self) -> list[Step]:
@@ -320,8 +333,9 @@ class Compiler:
             main[pos:pos] = new
             log.info("%s: %s spliced %s %s", where, [s.id for s in new], "after" if "after" in d else "before",
                      anchor)
-        done = self._apply_edits(edits, main, make, ids, adhoc, notes)
-        done += self._apply_edits(cli_edits, main, make, ids, True, notes, label="--edit")
+        transitions: dict[str, tuple[str, Any]] = {}       # step id -> (where, rules), from `edit:`
+        done = self._apply_edits(edits, main, make, ids, adhoc, notes, transitions=transitions)
+        done += self._apply_edits(cli_edits, main, make, ids, True, notes, label="--edit", transitions=transitions)
         if done:
             source += f"; edits: {', '.join(done)}"
         if start_at is not None:
@@ -335,28 +349,59 @@ class Compiler:
             source += f"; from {start_at}"
         segments = {MAIN: main}
         reactions: dict[str, dict[str, Reaction]] = {}
+        rules: dict[str, list[Rule]] = {}
+
+        def reaction_of(r: Any, where: str, key: str) -> Reaction:
+            if r in REACTION_WORDS:
+                return Reaction(r)
+            if isinstance(r, dict) and set(r) == {"goto"}:
+                return Reaction("goto", target=r["goto"])
+            if isinstance(r, (list, str)):
+                segments[key] = make(self.expand(r, where=where))
+                return Reaction("steps", segment=key)
+            raise ConfigError(f"{where}: want continue, stop, {{goto: <step>}} or a step list")
+
+        def rules_of(sid: str, given: Any, where: str) -> list[Rule]:
+            if not isinstance(given, list) or not given:
+                raise ConfigError(f"{where}: want a list of {{when: {{outcome, state}}, then: ...}} rules")
+            out = []
+            for i, rule in enumerate(given):
+                w = f"{where}[{i}]"
+                if not isinstance(rule, dict) or set(rule) != {"when", "then"} and set(rule) != {"then"}:
+                    raise ConfigError(f"{w}: a rule is {{when: {{outcome: ..., state: {{...}}}}, then: ...}}")
+                cond = rule.get("when") or {}
+                if not isinstance(cond, dict) or set(cond) - {"outcome", "state"}:
+                    raise ConfigError(f"{w}.when: takes outcome and state")
+                outs = cond.get("outcome")
+                outs = None if outs is None else (outs if isinstance(outs, list) else [outs])
+                state = cond.get("state") or {}
+                if not isinstance(state, dict):
+                    raise ConfigError(f"{w}.when.state: want {{<state var>: value | [values]}}")
+                reaction = reaction_of(rule["then"], f"{w}.then", f"{sid}!rule{i}")
+                text = (" ".join(filter(None, [f"outcome {'|'.join(outs)}" if outs else "",
+                                               ", ".join(f"{k}={'|'.join(map(str, v)) if isinstance(v, list) else v}"
+                                                         for k, v in state.items())])) or "otherwise")
+                out.append(Rule(outs, state, reaction, text))
+            return out
+
         for sid, by_outcome in (plan.get("on") or {}).items():
             where = f"plan.on.{sid}"
+            if isinstance(by_outcome, list):                 # transition rules (outcome + state)
+                rules[sid] = rules_of(sid, by_outcome, where)
+                continue
             if not isinstance(by_outcome, dict):
-                raise ConfigError(f"{where}: want {{<outcome>: <reaction>}}")
+                raise ConfigError(f"{where}: want {{<outcome>: <reaction>}} or a list of transition rules")
             for outcome, r in by_outcome.items():
-                key = f"{sid}!{outcome}"
-                if r in REACTION_WORDS:
-                    reaction = Reaction(r)
-                elif isinstance(r, dict) and set(r) == {"goto"}:
-                    reaction = Reaction("goto", target=r["goto"])
-                elif isinstance(r, (list, str)):
-                    segments[key] = make(self.expand(r, where=where))
-                    reaction = Reaction("steps", segment=key)
-                else:
-                    raise ConfigError(f"{where}.{outcome}: want continue, stop, {{goto: <step>}} or a step list")
-                reactions.setdefault(sid, {})[outcome] = reaction
+                reactions.setdefault(sid, {})[outcome] = reaction_of(r, f"{where}.{outcome}", f"{sid}!{outcome}")
+        for sid, (where, given) in transitions.items():      # edits re-route a step: they replace
+            reactions.pop(sid, None)
+            rules[sid] = rules_of(sid, given, where)
         expect: dict[str, Expect] = {}
         for sid, e in (plan.get("expect") or {}).items():
             if not isinstance(e, dict) or set(e) - {"outcome", "state"}:
                 raise ConfigError(f"plan.expect.{sid}: want {{outcome: ..., state: {{...}}}}")
             expect[sid] = Expect(e.get("outcome", PASSED), dict(e.get("state") or {}))
-        prog = Program(segments, reactions, expect, params, notes, source)
+        prog = Program(segments, reactions, expect, params, notes, source, rules)
         self._check_references(prog, adhoc or start_at is not None)
         log.info("compiled: main %s", [f"{s.id}" + (f"(={s.action})" if s.action != s.id else "") for s in prog.main])
         for s in prog.steps():
@@ -373,7 +418,7 @@ class Compiler:
         return prog
 
     def _apply_edits(self, edits: Any, main: list[Step], make, ids: _Ids, adhoc: bool,
-                     notes: list[str], label: str = "edit") -> list[str]:
+                     notes: list[str], label: str = "edit", transitions: dict | None = None) -> list[str]:
         """Apply the walk edits to `main` in place; return what was done, for the banner."""
         if edits is None:
             return []
@@ -425,6 +470,13 @@ class Compiler:
                 rel = "after" if "after" in ed else "before"
                 done += [f"+{n.id}" + (f" (again {ed['repeat']})" if op == "repeat" else "") + f" {rel} {anchor}"
                          for n in new]
+            elif op == "transition":
+                if "rules" not in ed:
+                    raise ConfigError(f"{where}: transition needs rules: [{{when: ..., then: ...}}, ...]")
+                if at(ed["transition"], "step") is not None:
+                    if transitions is not None:
+                        transitions[ed["transition"]] = (f"{where}.rules", ed["rules"])
+                    done.append(f"transitions of {ed['transition']}")
             elif op == "retry":
                 idx = at(ed["retry"], "step")
                 if idx is not None:
@@ -471,6 +523,30 @@ class Compiler:
                         prog.notes.append(f"plan.on.{sid}.{outcome} (goto {r.target!r}) dropped: not in this run")
                         continue
                     raise ConfigError(f"plan.on.{sid}.{outcome}: goto {r.target!r} is not a step on the main path")
+        for sid in list(prog.rules):
+            if sid not in all_ids:
+                if adhoc:
+                    del prog.rules[sid]
+                    prog.notes.append(f"transition rules of {sid} dropped: not in this run")
+                    continue
+                raise ConfigError(f"transition rules: no step {sid!r} in the plan")
+            act = self.reg.actions[prog.step(sid).action]
+            for i, r in enumerate(list(prog.rules[sid])):
+                where = f"transition rule {i} of {sid}"
+                bad = [o for o in r.outcomes or [] if o not in act.all_outcomes]
+                if bad:
+                    raise ConfigError(f"{where}: action {act.name!r} never ends {bad} "
+                                      f"(it declares {', '.join(sorted(act.all_outcomes))})")
+                for var, val in r.state.items():
+                    vals = val if isinstance(val, list) else [val]
+                    if var not in self.rc.states or any(v not in self.rc.states[var]["values"] for v in vals):
+                        raise ConfigError(f"{where}: state {var}={val!r} is not a declared state value")
+                if r.reaction.kind == "goto" and r.reaction.target not in main_ids:
+                    if adhoc:
+                        prog.rules[sid].remove(r)
+                        prog.notes.append(f"{where} (goto {r.reaction.target!r}) dropped: not in this run")
+                        continue
+                    raise ConfigError(f"{where}: goto {r.reaction.target!r} is not a step on the main path")
         for s in prog.steps():
             if s.retry:
                 self._check_retry(s)
@@ -564,6 +640,56 @@ def produced(act: ActionSpec, outcome: str, state: dict) -> dict:
     return out
 
 
+def reaction_text(prog: Program, r: Reaction) -> str:
+    if r.kind == "goto":
+        return f"goto {r.target}"
+    if r.kind == "steps":
+        return f"run {', '.join(s.id for s in prog.segments.get(r.segment or '', []))}, then go on"
+    return r.kind
+
+
+def matrix(prog: Program, reg: Registry) -> list[dict[str, str]]:
+    """The state/event matrix of the main walk: per step and outcome (the event), the state it
+    needs, the state it leaves, and what comes next. `*` marks the expected outcome."""
+    rows = []
+    for s in prog.main:
+        act = reg.actions[s.action]
+        exp = prog.expected(s.id).outcome
+        named = sorted(o for o in act.all_outcomes if o not in (PASSED, "failed", "errored", "aborted", SKIPPED))
+        rules = prog.rules.get(s.id)
+        for n, o in enumerate([PASSED, *named, "failed", "errored", "aborted"]):
+            spec = act.produces if o == PASSED else act.produces_on.get(o, {})
+            after = ", ".join(f"{k}: " + (" ".join(f"{a}->{b}" for a, b in v.items()) if isinstance(v, dict) else str(v))
+                              for k, v in spec.items()) or "(unchanged)"
+            if o == "aborted":
+                nxt = "stop (aborted)"
+            elif rules is not None:
+                hits = [r for r in rules if r.outcomes is None or o in r.outcomes]
+                nxt = "; ".join(f"{r.text} -> {reaction_text(prog, r.reaction)}" for r in hits)
+                if not any(not r.state for r in hits):
+                    nxt += ("; " if nxt else "") + "otherwise -> stop (failed)"
+            else:
+                r = prog.reactions.get(s.id, {}).get(o)
+                nxt = reaction_text(prog, r) if r else ("continue" if o == exp else "stop (failed)")
+            req = ", ".join(f"{k}: {'|'.join(map(str, v)) if isinstance(v, list) else v}"
+                            for k, v in act.requires.items()) or "-"
+            rows.append({"step": s.id if n == 0 else "", "requires": req if n == 0 else "",
+                         "outcome": o + ("*" if o == exp else ""), "after": after, "next": nxt})
+    return rows
+
+
+def matrix_text(rows: list[dict[str, str]]) -> list[str]:
+    cols = [("step", "step"), ("requires", "requires (state in)"), ("outcome", "outcome (event)"),
+            ("after", "state after"), ("next", "next")]
+    w = {k: max([len(h)] + [len(r[k]) for r in rows]) for k, h in cols}
+    line = lambda r: "  " + " | ".join(r[k].ljust(w[k]) for k, _ in cols).rstrip()  # noqa: E731
+    return [line({k: h for k, h in cols}), "  " + "-+-".join("-" * w[k] for k, _ in cols)] + [line(r) for r in rows]
+
+
+def state_matches(want: dict, state: dict) -> bool:
+    return all(state.get(k) in (v if isinstance(v, list) else [v]) for k, v in want.items())
+
+
 @dataclass
 class Transition:
     cursor: Cursor | None           # None: the run ends
@@ -591,26 +717,37 @@ class Walker:
                 return tuple(frames)
         return None
 
-    def next(self, cur: Cursor, outcome: str) -> Transition:
+    def next(self, cur: Cursor, outcome: str, state: dict | None = None) -> Transition:
         step = self.current(cur)
         expected = self.prog.expected(step.id).outcome
         matched = outcome == expected or (outcome == SKIPPED and expected == PASSED)
+        rules = self.prog.rules.get(step.id)
+        if rules is not None and outcome != SKIPPED:
+            for r in rules:
+                if (r.outcomes is None or outcome in r.outcomes) and state_matches(r.state, state or {}):
+                    return self._react(cur, step, r.reaction, outcome, matched, f" (rule: {r.text})")
+            return Transition(None, "failed", f"{step.id} ended {outcome} with state {state or {}}: "
+                                              f"no transition rule matches")
         r = self.prog.reactions.get(step.id, {}).get(outcome)
         if r is None:
             if matched:
                 return Transition(self._advance(cur), "ok")
             return Transition(None, "failed", f"{step.id} ended {outcome}, expected {expected}")
+        return self._react(cur, step, r, outcome, matched)
+
+    def _react(self, cur: Cursor, step: Step, r: Reaction, outcome: str, matched: bool,
+               because: str = "") -> Transition:
         verdict = "ok" if matched else "diverted"
         if r.kind == "continue":
             return Transition(self._advance(cur), verdict)
         if r.kind == "stop":
             return Transition(None, "ok" if matched else "failed",
-                              f"{step.id} ended {outcome}: plan says stop")
+                              f"{step.id} ended {outcome}: plan says stop{because}")
         if r.kind == "goto":
             idx = next(n for n, s in enumerate(self.prog.main) if s.id == r.target)
-            return Transition(((MAIN, idx),), verdict, f"{step.id} ended {outcome}: goto {r.target}")
+            return Transition(((MAIN, idx),), verdict, f"{step.id} ended {outcome}: goto {r.target}{because}")
         # steps: run the reaction segment, then carry on after this step
-        return Transition(cur + ((r.segment, 0),), verdict, f"{step.id} ended {outcome}: reaction")
+        return Transition(cur + ((r.segment, 0),), verdict, f"{step.id} ended {outcome}: reaction{because}")
 
 
 # ── static validation ────────────────────────────────────────────────────────
@@ -653,7 +790,7 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
         v.walk.append(step.id if run else f"({step.id}: skipped, when)")
         if run:
             state.update(produced(reg.actions[step.action], outcome, state))
-        cur = walker.next(cur, outcome).cursor
+        cur = walker.next(cur, outcome, state).cursor
 
     stack = [(walker.start(), dict(state0), {}, ())]
     while stack:
@@ -677,7 +814,7 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
                   f"(via {' > '.join(trail[-6:])}); the run would stop there"] = None
             continue
         if not when_holds(step.when, deep_merge(data, {rc.params_section: step.with_})):
-            stack.append((walker.next(cur, SKIPPED).cursor, state, visits, trail))
+            stack.append((walker.next(cur, SKIPPED, state).cursor, state, visits, trail))
             continue
         ok, unknown = requires_holds(act.requires, state)
         for var in unknown:
@@ -689,7 +826,8 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
             errs[f"{step.id}: requires {act.requires}, but {before} leaves {have}"] = None
             continue
         exp = prog.expected(step.id)
-        outcomes = {exp.outcome} | set(prog.reactions.get(step.id, {}))
+        rules = prog.rules.get(step.id) or []
+        outcomes = {exp.outcome} | set(prog.reactions.get(step.id, {})) | {o for r in rules for o in r.outcomes or []}
         for outcome in sorted(outcomes):
             new = {**state, **produced(act, outcome, state)}
             if outcome == exp.outcome:
@@ -698,8 +836,16 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
                         errs[f"{step.id}: expect.state says {var}={val!r}, but ending {outcome} "
                              f"leaves {var}={new[var]!r}"] = None
                     new[var] = val
-            t = walker.next(cur, outcome)
-            stack.append((t.cursor, new, visits, trail))
+            # the model's own end state, and every state a rule for this outcome names: an
+            # observer may report it, so its branch is judged too (goto form after a join that
+            # left the rig only installed)
+            ends = [new] + [{**new, **dict(combo)} for r in rules
+                            if r.state and (r.outcomes is None or outcome in r.outcomes)
+                            for combo in itertools.product(*[[(k, x) for x in (v if isinstance(v, list) else [v])]
+                                                             for k, v in r.state.items()])]
+            for end in ends:
+                t = walker.next(cur, outcome, end)
+                stack.append((t.cursor, end, visits, trail))
     v.errors = list(errs)
     v.warnings = list(warns)
     return v

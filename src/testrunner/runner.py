@@ -25,7 +25,7 @@ from .api import (ABORTED, ERRORED, FAILED, PASSED, SKIPPED, Outcome, OutcomeErr
 from .config import RunConfig, RunnerConfig, deep_merge, lookup
 from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
-from .planner import Program, Step, Walker, produced, requires_holds, when_explained, when_holds
+from .planner import Program, Step, Walker, matrix, produced, requires_holds, when_explained, when_holds
 from .proc import DEFAULT_PROMPT_PATTERN, Proc
 from . import report
 from .log import STEP
@@ -251,6 +251,7 @@ class Runner:
         run.state = state
         result = RunResult(True, run.results)
         self.journal("run_start", config=str(self.run_config.file or ""), source=program.source,
+                     matrix=matrix(program, self.reg),
                                   steps=[s.id for s in program.main], state=state, pid=os.getpid(),
                      readonly=self.readonly)
         try:
@@ -311,7 +312,7 @@ class Runner:
                     log.warning("aborted by the operator after %s", step.id)
                     result.passed, result.why = False, "aborted by the operator"
                     break
-                t = walker.next(cur, sr.outcome)
+                t = walker.next(cur, sr.outcome, run.state)
                 sr.verdict = t.verdict
                 log.info("after %s ended %s: verdict %s%s; next %s", step.id, sr.outcome, t.verdict,
                          f" ({t.why})" if t.why else "",
@@ -320,6 +321,8 @@ class Runner:
                     result.passed, result.why = False, t.why
                 elif t.verdict == "diverted":
                     self.say(f"     {t.why}")
+                elif t.why:                       # a routing decision on the expected outcome (a rule, a goto)
+                    self.say(self.style.dim(f"     {t.why}"))
                 cur = t.cursor
         finally:
             problems = await run.finish()
