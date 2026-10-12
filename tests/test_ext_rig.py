@@ -340,3 +340,36 @@ def test_the_package_imports_nothing_until_asked():
                         "import sys, testrunner.ext.rig; print(sorted(m for m in sys.modules if m.startswith('testrunner.ext.rig.')))"],
                        capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(SRC)})
     assert r.returncode == 0 and r.stdout.strip() == "[]", r.stdout + r.stderr
+
+
+def test_the_generated_ansible_cfg_skips_a_pycache_in_the_inventory(rig_root, tmp_path):
+    # Python leaves inventory/__pycache__ once anything imports an inventory script; ansible
+    # then warns it cannot parse it (lab qdevice run b0e914d8, 2026-10-12). The generated
+    # config tells ansible to skip it, so the warning never reaches the inventory probe.
+    import shutil
+    import yaml
+
+    class R(Rig):
+        @property
+        def ansible_dir(self):
+            return rig_root / "ansible"
+    R(rig_root, yaml.safe_load(DEFAULT), rig_root / "configs" / "default.yml").ensure_config()
+    cfg = (rig_root / "ansible.cfg").read_text()
+    assert "\ninventory_ignore_patterns = __pycache__\n" in cfg
+    exe = shutil.which("ansible-inventory")
+    if not exe:
+        pytest.skip("ansible-inventory not installed: the behaviour half needs it")
+    inv = tmp_path / "inv"
+    (inv / "__pycache__").mkdir(parents=True)
+    (inv / "__pycache__" / "x.cpython-314.pyc").write_bytes(b"")
+    (inv / "hosts.yml").write_text("all:\n  hosts:\n    h1:\n")
+    out = {}
+    for name, path in (("generated", rig_root / "ansible.cfg"), ("bare", tmp_path / "bare.cfg")):
+        if name == "bare":
+            path.write_text("[defaults]\n")
+        r = subprocess.run([exe, "-i", str(inv), "--list"], capture_output=True, text=True,
+                           env={**os.environ, "ANSIBLE_CONFIG": str(path)})
+        out[name] = r.stdout + r.stderr
+    assert "h1" in out["generated"] and "__pycache__" not in out["generated"]
+    # negative control: the same inventory WITHOUT the setting does warn, so the check above can fail
+    assert "Unable to parse" in out["bare"] and "__pycache__" in out["bare"]

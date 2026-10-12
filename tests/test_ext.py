@@ -160,6 +160,34 @@ def test_group_refuses_an_inventory_that_did_not_parse(tmp_path, bin_dir):
         asyncio.run(ans(tmp_path).group("web"))
 
 
+PYCACHE_NOISE = 'echo "[WARNING]: Unable to parse /rig/inventory/__pycache__ as an inventory source"\n'
+
+
+def test_group_and_hostvar_ignore_a_pycache_beside_the_inventory_script(tmp_path, bin_dir):
+    # measured 2026-10-12 (lab qdevice run b0e914d8): ansible warns about inventory/__pycache__
+    # and resolves the group from the real sources; refusing that is a false alarm
+    stub(tmp_path / "bin", "ansible-inventory", PYCACHE_NOISE +
+         'echo \'{"all": {"children": ["web"]}, "web": {"hosts": ["w1"]}}\'\n')
+    assert asyncio.run(ans(tmp_path).group("web")) == ["w1"]
+    stub(tmp_path / "bin", "ansible", PYCACHE_NOISE +
+         'echo \'localhost | SUCCESS => {\'; echo \'    "msg": "zfs"\'; echo "}"\n')
+    assert asyncio.run(ans(tmp_path).hostvar("n1", "backend")) == "zfs"
+
+
+@pytest.mark.parametrize("real", [
+    BROKEN_INVENTORY,
+    'echo "[WARNING]: Unable to parse /rig/inventory/lifecycle.py as an inventory source"\n',
+    'echo "[WARNING]: Unable to parse /rig/__pycache__/x.yml as an inventory source"\n',
+])
+def test_pycache_noise_never_hides_a_real_parse_failure(tmp_path, bin_dir, real):
+    # the exemption is the __pycache__ DIRECTORY only: a broken script or a file that merely
+    # sits under a __pycache__ path still refuses, and the noise is not quoted as the reason
+    stub(tmp_path / "bin", "ansible-inventory", PYCACHE_NOISE + real + 'echo \'{"all": {"children": []}}\'\n')
+    with pytest.raises(OutcomeError, match="did not parse") as e:
+        asyncio.run(ans(tmp_path).group("web"))
+    assert "inventory/__pycache__ as" not in str(e.value)
+
+
 def test_console_capture_refuses_by_name_when_a_tool_is_missing(tmp_path, monkeypatch):
     # measured 2026-10-11: no `script` on a Fedora 44 host -> a bare FileNotFoundError
     # five minutes into `up`; now a named refusal, and a check to run BEFORE building

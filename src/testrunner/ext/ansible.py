@@ -47,6 +47,17 @@ logger = logging.getLogger(__name__)   # not `log`: methods take a log= file nam
 # the implicit localhost), so these lines are the ONLY sign the answer is not real.
 INVENTORY_BROKEN = re.compile(r"Unable to parse .* as an inventory source|No inventory was parsed|"
                               r"Failed to parse inventory|Inventory script returned non-zero")
+# A directory inventory makes ansible try EVERY entry as a source, and Python leaves a
+# __pycache__ beside an inventory script the moment anything imports it. ansible warns and
+# goes on with the real sources, so that one warning is noise, not an empty inventory
+# (measured 2026-10-12: lab's group resolved to both nodes while the probe refused).
+INVENTORY_NOISE = re.compile(r"Unable to parse \S*/__pycache__/? as an inventory source")
+
+
+def inventory_broken(text: str) -> list[str]:
+    """The lines saying the inventory did not parse, minus the known-harmless ones."""
+    return [ln for ln in text.replace("\r", "").splitlines()
+            if INVENTORY_BROKEN.search(ln) and not INVENTORY_NOISE.search(ln)]
 
 
 class InventoryBroken(OutcomeError):
@@ -56,7 +67,7 @@ class InventoryBroken(OutcomeError):
         for i, ln in enumerate(lines):
             if ln.startswith("Standard error from inventory script") and i + 1 < len(lines):
                 why.append(lines[i + 1])    # the script's own words: usually the real reason
-        why += [ln for ln in lines if INVENTORY_BROKEN.search(ln)]
+        why += [ln.strip() for ln in inventory_broken(output)]
         super().__init__(ERRORED, f"{what}: the inventory did not parse, so ansible answered from an "
                                   f"EMPTY inventory — " + " | ".join(dict.fromkeys(why))[:600])
 
@@ -236,7 +247,7 @@ class Ansible:
 
     @staticmethod
     def raise_for_inventory(r: Result, what: str) -> None:
-        if INVENTORY_BROKEN.search(r.text):
+        if inventory_broken(r.text):
             raise InventoryBroken(what, r.text)
 
     def describe(self) -> str:
