@@ -13,6 +13,10 @@ Step entry forms (in paths, plan paths, detours and reactions):
   {action: install, id: install-2, with: {...}, when: {...}, max_visits: 2}
   {stages: [up, ping], with: {...}}    a group sharing `with` (run-config list form)
   [a, b]                    a nested list, spliced in place
+
+On the command line, `all` (alone) means the run config's plan, exactly as a bare run; when
+the plan is empty it means the runner config's `all.fallback` path. `all` is never a step
+inside a plan or path: there it would mean the plan itself.
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ log = logging.getLogger(__name__)
 
 MAIN = "main"
 REACTION_WORDS = ("continue", "stop")
+ALL = "all"
 
 
 @dataclass
@@ -59,6 +64,8 @@ class Program:
     expect: dict[str, Expect]
     params: dict[str, Any]
     notes: list[str] = field(default_factory=list)
+    # where the main path came from, for people: "plan of x.yml", "all = path full (...)", ...
+    source: str = ""
 
     @property
     def main(self) -> list[Step]:
@@ -103,6 +110,9 @@ class _Ids:
 class Compiler:
     def __init__(self, rc: RunnerConfig, reg: Registry):
         self.rc, self.reg = rc, reg
+        if ALL in reg.actions:
+            raise ConfigError("an action may not be named `all`: on the command line `all` means the "
+                              "run config's plan")
 
     # entries -> (action, with, when, id, max_visits) tuples, ids assigned later
     def expand(self, entries: Any, inherited_with: dict | None = None, depth: int = 0,
@@ -138,7 +148,14 @@ class Compiler:
                 raise ConfigError(f"{where}: cannot read step {e!r}")
         return out
 
+    def _all_inside(self, where: str) -> ConfigError:
+        fb = self.rc.all_fallback
+        return ConfigError(f"{where}: `all` means the run config's plan itself, so it cannot be a step "
+                           f"of a plan or path" + (f"; name the path {fb!r}" if fb else ""))
+
     def _expand_name(self, name: str, w: dict, depth: int, where: str) -> list[dict]:
+        if name == ALL:
+            raise self._all_inside(where)
         if ".." in name:
             return self._expand_range(name, w, depth, where)
         if name in self.rc.paths:
@@ -157,6 +174,8 @@ class Compiler:
     def _expand_range_(self, spec: str, w: dict, depth: int, where: str) -> list[dict]:
         path_name, _, rng = spec.rpartition(":")
         path_name = path_name or self.rc.default_path
+        if path_name == ALL:
+            raise self._all_inside(where)
         if not path_name:
             raise ConfigError(f"{where}: range {spec!r} needs a path (no default_path is set)")
         if path_name not in self.rc.paths:
@@ -174,7 +193,8 @@ class Compiler:
         return full[ia:ib + 1]
 
     def compile(self, plan: Any, cli_steps: list[str] | None = None,
-                cli_with: dict | None = None) -> Program:
+                cli_with: dict | None = None, plan_of: str = "the run config") -> Program:
+        """`plan_of` names where the plan comes from (RunConfig.plan_of), for Program.source."""
         notes: list[str] = []
         if plan is None:
             plan = {}
@@ -187,10 +207,26 @@ class Compiler:
         unknown = {str(k) for k in plan} - {"path", "with", "detours", "on", "expect"}
         if unknown:
             raise ConfigError(f"plan: unknown key(s) {', '.join(sorted(unknown))}")
-        adhoc = bool(cli_steps)
-        path = cli_steps if adhoc else plan.get("path")
-        log.info("compiling %s: %s", "the steps given on the command line" if adhoc else "the run config's plan",
-                 path)
+        cli_steps = list(cli_steps or [])
+        if ALL in cli_steps and len(cli_steps) > 1:
+            raise ConfigError("`all` stands alone: it means the whole plan; give it without other steps")
+        if cli_steps == [ALL]:
+            # `all` is a bare run of the plan (strict, as written); an empty plan falls back
+            if self.expand(plan.get("path") or [], where="plan.path"):
+                adhoc, path, source = False, plan.get("path"), f"all = plan of {plan_of}"
+            elif self.rc.all_fallback:
+                fb = self.rc.all_fallback
+                adhoc, path, source = True, [fb], f"all = path {fb} ({plan_of} has no plan)"
+            else:
+                raise ConfigError(f"`all`: {plan_of} has no plan, and the runner config names no fallback "
+                                  f"path (all: {{fallback: <path>}})")
+        elif cli_steps:
+            adhoc, path = True, cli_steps
+            source = (f"path {path[0]} (command line)" if len(path) == 1 and path[0] in self.rc.paths
+                      else f"command line: {' '.join(path)}")
+        else:
+            adhoc, path, source = False, plan.get("path"), f"plan of {plan_of}"
+        log.info("compiling the steps: %s: %s", source, path)
         if path is None:
             path = []
         params = deep_merge(plan.get("with") or {}, cli_with or {})
@@ -244,7 +280,7 @@ class Compiler:
             if not isinstance(e, dict) or set(e) - {"outcome", "state"}:
                 raise ConfigError(f"plan.expect.{sid}: want {{outcome: ..., state: {{...}}}}")
             expect[sid] = Expect(e.get("outcome", PASSED), dict(e.get("state") or {}))
-        prog = Program(segments, reactions, expect, params, notes)
+        prog = Program(segments, reactions, expect, params, notes, source)
         self._check_references(prog, adhoc)
         log.info("compiled: main %s", [f"{s.id}" + (f"(={s.action})" if s.action != s.id else "") for s in prog.main])
         for s in prog.steps():

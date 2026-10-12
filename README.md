@@ -116,6 +116,21 @@ By default the walk is linear: a step that ends as expected continues, anything 
 stops the run and leaves the system as it is. Steps can also carry `when:` (a condition
 on the config) and `max_visits:` (a bound for `goto` loops).
 
+**`all` vs the plan.** On the command line, `all` means the run config's plan: it compiles
+exactly like a bare `testrunner`, `with`/`detours`/`on`/`expect` included. When the plan is
+empty, `all` runs the runner config's `all.fallback` path instead (with the plan's other keys,
+leniently: a detour whose anchor is not on that path is dropped with a note). `all` stands
+alone on the command line, and is refused inside a plan or path, where it would mean the plan
+itself: name the fallback path there. Every walk says where its steps came from, in `--plan`,
+the run banner, the trace, the journal and `--report`:
+```
+steps: plan of sdn.yml (via sdn+lvmthin.yml)          # bare run; the plan is inherited
+steps: all = plan of sdn.yml (via sdn+lvmthin.yml)
+steps: all = path full (default.yml has no plan)
+steps: path full (command line)
+steps: command line: up..join verify
+```
+
 **Before anything runs**, the observers are asked what the system IS (a run, not `--plan`,
 which reads only the store), and the plan is simulated from there over every reachable branch: every
 `requires` must hold, every reaction must name an outcome its action can end with, every
@@ -240,6 +255,7 @@ does, so later runners can use them. It also records which values are NOLOG.
 
 ```
 testrunner                       run the run config's plan
+testrunner all                   the same; an empty plan runs the all.fallback path
 testrunner a..c d                run these steps (actions, paths, ranges), in order
 testrunner --plan [steps]        validate and print the walk; run nothing
 testrunner --list | --status | --scenario | --select -c NAME | --release | --report-of RUN
@@ -261,6 +277,7 @@ state_dir: state               # the subscriber's state (journal, state, scenari
 states: {...}
 paths: {lifecycle: [install, start, seed, verify]}
 default_path: lifecycle        # what ranges slice (implied when there is one path)
+all: {fallback: lifecycle}     # what `all` runs when the plan is empty (no path may be named `all`)
 configs: {dir: configs, env: MY_CONFIG, link: my.yml, default: default}
 params_section: params         # the run-config section that holds step parameters
 scenario: {release_when: {...}}

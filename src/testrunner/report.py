@@ -47,6 +47,7 @@ class RunRecord:
     id: str
     start: datetime
     config: str = ""
+    source: str = ""            # where the steps came from ("plan of x.yml", "all = path full (...)")
     end: datetime | None = None
     passed: bool | None = None
     why: str = ""
@@ -80,7 +81,7 @@ def runs_from_journal(store: Store) -> list[RunRecord]:
         if ev == "run_start":
             rid = e.get("run") or f"run{n}"
             current = rid
-            runs[rid] = RunRecord(rid, _t(e), config=e.get("config", ""))
+            runs[rid] = RunRecord(rid, _t(e), config=e.get("config", ""), source=e.get("source", ""))
             order.append(rid)
             continue
         run = runs.get(rid)
@@ -297,7 +298,7 @@ th {{ color:var(--ink2); font-weight:600; }} td.num {{ text-align:right; font-va
 #tip b {{ font-weight:600; }}
 </style></head><body><main>
 <h1>{esc(title)}</h1>
-<div class="sub">{esc(name)} · started {run.start:%Y-%m-%d %H:%M:%S} UTC{(" · " + esc(run.why)) if run.why else ""}</div>
+<div class="sub">{esc(name)}{(" · steps: " + esc(run.source)) if run.source else ""} · started {run.start:%Y-%m-%d %H:%M:%S} UTC{(" · " + esc(run.why)) if run.why else ""}</div>
 <div class="tiles">
   <div class="tile"><div class="k">result</div><div class="v"><span class="pill s-{vstat}">{ICON[vstat]}</span> {verdict}</div></div>
   <div class="tile"><div class="k">wall time</div><div class="v">{_dur(total)}</div></div>
@@ -371,6 +372,8 @@ def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Sto
     out = [f"# Test report: {name} — {vicon} {verdict}", ""]
     facts = [("run", f"`{run.id}`"), ("started", f"{run.start:%Y-%m-%d %H:%M:%S} UTC"),
              ("wall time", _dur(run.seconds)), ("steps passed", f"{n_pass} / {len(run.steps)}")]
+    if run.source:
+        facts.insert(1, ("steps", _md(run.source)))
     if prev is not None and prev.seconds > 0 and run.passed is not None:
         d = (run.seconds - prev.seconds) / prev.seconds
         facts.append(("vs previous run of these steps", f"{d * 100:+.0f}% (`{prev.id}`: {_dur(prev.seconds)})"))

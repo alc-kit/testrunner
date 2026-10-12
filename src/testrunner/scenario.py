@@ -67,7 +67,9 @@ def adhere(rc: RunnerConfig, rec: dict, choice: str | None) -> Selection:
                 f"{chosen.name if chosen else choice!r}. Run without a config selection to join the "
                 f"scenario, or end it first with --release")
     sel = Selection(RunConfig(file, rec.get("how", "default"), rec["data"],
-                              rec.get("nolog_paths", []), scenario=describe(rec)), rec)
+                              rec.get("nolog_paths", []), scenario=describe(rec),
+                              # records from before plan_file was kept: the config file names the plan
+                              plan_file=Path(rec["plan_file"]) if rec.get("plan_file") else None), rec)
     if file is not None and file.exists():
         try:
             fresh = load_run_config(rc, str(file)).data
@@ -95,6 +97,7 @@ def select(rc: RunnerConfig, store: Store, name: str | None, claim: bool, run_id
               # the snapshot holds the real values (later runners need them, as the config
               # file on disk does); which ones are NOLOG travels with it
               "nolog_paths": run_config.nolog_paths,
+              "plan_file": str(run_config.plan_file) if run_config.plan_file else None,
               "selected_at": utcnow(), "run_id": run_id, "pid": os.getpid()}
     claimed, rec = store.claim_scenario(record)
     if not claimed:      # a parallel runner won the race: join ITS scenario

@@ -113,6 +113,8 @@ class RunnerConfig:
     states: dict[str, dict] = field(default_factory=dict)
     paths: dict[str, list] = field(default_factory=dict)
     default_path: str | None = None
+    # what the CLI word `all` runs when the run config's plan is empty (`all: {fallback: <path>}`)
+    all_fallback: str | None = None
     configs_dir: Path = Path("configs")
     config_env: str | None = None
     config_link: str | None = None
@@ -136,7 +138,7 @@ def find_runner_config(start: Path) -> Path:
 
 
 KNOWN_RUNNER_KEYS = {"modules", "actions", "state_dir", "states", "paths", "default_path",
-                     "configs", "params_section", "input", "scenario", "pythonpath"}
+                     "configs", "params_section", "input", "scenario", "pythonpath", "all"}
 
 
 def load_runner_config(path: Path) -> RunnerConfig:
@@ -160,6 +162,15 @@ def load_runner_config(path: Path) -> RunnerConfig:
     for name, steps in paths.items():
         if not isinstance(steps, list):
             raise ConfigError(f"{path}: paths.{name} must be a list of steps")
+    if "all" in paths:
+        raise ConfigError(f"{path}: a path may not be named `all`: on the command line `all` means the "
+                          f"run config's plan. Rename it (e.g. `full`) and name it as `all: {{fallback: full}}`")
+    all_spec = data.get("all") or {}
+    if not isinstance(all_spec, dict) or set(all_spec) - {"fallback"}:
+        raise ConfigError(f"{path}: all takes only fallback (all: {{fallback: <path>}})")
+    all_fallback = all_spec.get("fallback")
+    if all_fallback is not None and all_fallback not in paths:
+        raise ConfigError(f"{path}: all.fallback {all_fallback!r} is not in paths")
     default_path = data.get("default_path")
     if default_path is None and len(paths) == 1:
         default_path = next(iter(paths))
@@ -179,7 +190,7 @@ def load_runner_config(path: Path) -> RunnerConfig:
         pythonpath=[root / p for p in (data.get("pythonpath") or [])],
         shell_actions=data.get("actions") or {},
         state_dir=root / data.get("state_dir", "state"),
-        states=states, paths=paths, default_path=default_path,
+        states=states, paths=paths, default_path=default_path, all_fallback=all_fallback,
         configs_dir=root / configs.get("dir", "configs"),
         config_env=configs.get("env"), config_link=configs.get("link"),
         default_config=configs.get("default", "default"),
@@ -200,10 +211,20 @@ class RunConfig:
     # scenario's config was ORIGINALLY selected (--config, $ENV, ./link, default), so a
     # subscriber can still tell a deliberately chosen config from the default one.
     scenario: str = ""
+    # the file that STATES the plan: an ancestor when the plan is inherited through `extends:`
+    plan_file: Path | None = None
 
     @property
     def plan(self) -> Any:
         return self.data.get("plan")
+
+    @property
+    def plan_of(self) -> str:
+        """Where the plan comes from, for people: `sdn.yml (via sdn+lvmthin.yml)`."""
+        own = self.file.name if self.file else "(no run config)"
+        if self.file is None or self.plan_file is None or self.plan_file.resolve() == self.file.resolve():
+            return own
+        return f"{self.plan_file.name} (via {own})"
 
 
 def resolve_config_file(rc: RunnerConfig, name: str | None) -> tuple[Path | None, str]:
@@ -244,6 +265,7 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
     if file is None:
         return RunConfig(None, how, apply_config_hooks(rc, {}, how, None, []))
     seen: list[Path] = []
+    plan_from: list[Path] = []          # the files that state a plan, ancestors first
 
     def load(p: Path) -> dict:
         p = p.resolve()
@@ -254,6 +276,8 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
         data = load_file(p)
         parent = data.pop("extends", None)
         if parent is None:
+            if "plan" in data:
+                plan_from.append(p)
             return data
         base_dir = p.parent
         cand = None
@@ -273,6 +297,7 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
         # A plan is a whole: a child that states one replaces the parent's.
         if "plan" in data:
             merged["plan"] = copy.deepcopy(data["plan"])
+            plan_from.append(p)
         return merged
 
     data = load(file)
@@ -283,7 +308,11 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
     data, nolog_paths = unwrap(data)
     log.info("loaded run config %s (%s)%s", file, how,
              f"; NOLOG at {nolog_paths}" if nolog_paths else "")
-    return RunConfig(file, how, apply_config_hooks(rc, data, how, file, nolog_paths), nolog_paths)
+    plan_file = plan_from[-1] if plan_from else None
+    if plan_file is not None and plan_file != file.resolve():
+        log.info("its plan is inherited from %s", plan_file)
+    return RunConfig(file, how, apply_config_hooks(rc, data, how, file, nolog_paths), nolog_paths,
+                     plan_file=plan_file)
 
 
 def _leaves(data: Any, prefix: str = "") -> dict[str, Any]:
