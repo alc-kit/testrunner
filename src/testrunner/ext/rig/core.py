@@ -357,6 +357,7 @@ roles_path = {roles}
 host_key_checking = False
 retry_files_enabled = False
 interpreter_python = auto_silent
+inventory_ignore_patterns = __pycache__
 log_path = {self.logs}/ansible.log
 callbacks_enabled = ansible.posix.profile_tasks, ansible.posix.timer
 callback_plugins = {self.ansible_dir}/callback_plugins
