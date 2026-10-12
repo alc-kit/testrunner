@@ -367,6 +367,48 @@ testrunner --list | --status | --scenario | --select -c NAME | --release | --rep
 ```
 Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).
 
+## Extensions
+
+`testrunner.ext` holds the tooling a subscriber builds its actions on. A subscriber imports
+what it needs:
+- `ext.ansible`: playbooks and inventory queries, refusing an empty scope.
+- `ext.vagrant`: `vagrant status` and `up`, and what exists.
+- `ext.console`: serial console capture.
+- `ext.rig`: a whole vagrant + ansible test rig.
+
+An extension's settings live in the runner config under `ext: {<name>: {...}}`.
+
+**`ext.rig`** is what every such rig is built from, whatever it tests:
+- the run config and the environment it becomes (`rig.config`, a schema engine: the rig's
+  `<configs>/schema.yml` declares its keys, types, allowed values, rules and environment names);
+- the node catalogue (`rig.nodes`);
+- the generated `ansible.cfg` and harness key;
+- scope guards: only nodes that EXIST, and never an empty scope;
+- the `rig` observer, the purge of stale per-node state, drive rules for the playbooks' prompts,
+  the console capture and the sweep for leftover libvirt domains.
+
+A rig describes itself in data:
+```yaml
+ext:
+  rig:
+    name: myrig
+    prefix: MYRIG                 # its environment: MYRIG_*
+    cluster_kind: node            # the catalogue `kind:` whose machines form the cluster
+    cluster_noun: cluster         # "a <noun> node" in messages
+    configs: configs              # run configs + schema.yml
+    catalogue: lifecycle/nodes.yml
+    stale_files: [secrets/recovery_key.txt]
+```
+It subclasses `testrunner.ext.rig.Rig` only for what it does differently. The three tools also
+run as commands for a Vagrantfile or a shell:
+```
+python -m testrunner.ext.rig.config --root <rig> {select|env|show|plan|lock-write|lock-diff} ...
+python -m testrunner.ext.rig.nodes  --root <rig> {validate|list|shell|get|role|scenarios|json} ...
+python -m testrunner.ext.rig.drive_rules {check|render} ...
+```
+A rig usually keeps a three-line `bin/` wrapper for each. The package docstring
+(`testrunner/ext/rig/__init__.py`) and each module's header have the details.
+
 ## The runner config
 
 `testrunner.yml` (or `.toml`) at the subscriber root:

@@ -115,6 +115,9 @@ class RunnerConfig:
     default_path: str | None = None
     # what the CLI word `all` runs when the run config's plan is empty (`all: {fallback: <path>}`)
     all_fallback: str | None = None
+    # extensions' own settings, by extension name (`ext: {rig: {...}}`): each extension
+    # validates its part
+    ext: dict[str, dict] = field(default_factory=dict)
     configs_dir: Path = Path("configs")
     config_env: str | None = None
     config_link: str | None = None
@@ -138,7 +141,7 @@ def find_runner_config(start: Path) -> Path:
 
 
 KNOWN_RUNNER_KEYS = {"modules", "actions", "state_dir", "states", "paths", "default_path",
-                     "configs", "params_section", "input", "scenario", "pythonpath", "all"}
+                     "configs", "params_section", "input", "scenario", "pythonpath", "all", "ext"}
 
 
 def load_runner_config(path: Path) -> RunnerConfig:
@@ -165,6 +168,9 @@ def load_runner_config(path: Path) -> RunnerConfig:
     if "all" in paths:
         raise ConfigError(f"{path}: a path may not be named `all`: on the command line `all` means the "
                           f"run config's plan. Rename it (e.g. `full`) and name it as `all: {{fallback: full}}`")
+    ext = data.get("ext") or {}
+    if not isinstance(ext, dict) or not all(isinstance(v, dict) for v in ext.values()):
+        raise ConfigError(f"{path}: ext: want {{<extension>: {{settings}}}}")
     all_spec = data.get("all") or {}
     if not isinstance(all_spec, dict) or set(all_spec) - {"fallback"}:
         raise ConfigError(f"{path}: all takes only fallback (all: {{fallback: <path>}})")
@@ -190,7 +196,7 @@ def load_runner_config(path: Path) -> RunnerConfig:
         pythonpath=[root / p for p in (data.get("pythonpath") or [])],
         shell_actions=data.get("actions") or {},
         state_dir=root / data.get("state_dir", "state"),
-        states=states, paths=paths, default_path=default_path, all_fallback=all_fallback,
+        states=states, paths=paths, default_path=default_path, all_fallback=all_fallback, ext=ext,
         configs_dir=root / configs.get("dir", "configs"),
         config_env=configs.get("env"), config_link=configs.get("link"),
         default_config=configs.get("default", "default"),
