@@ -120,6 +120,9 @@ class Proc:
         self.prompt_idle = prompt_idle
         # --show-commands: called with a copy-pasteable line before every command starts
         self.show_command = show_command
+        # every command's output (escape sequences stripped, secrets masked): the evidence a
+        # step's `retry: {if: {output: ...}}` is judged on. Nothing for a NOLOG action.
+        self.transcript: list[str] = []
 
     async def run(self, argv: list[str] | str, *, cwd: Path | None = None,
                   env: dict[str, str] | None = None, log: str | None = None,
@@ -327,6 +330,8 @@ class Proc:
                 logf.close()
         result = Result(argv, proc.returncode if proc.returncode is not None else -1, bytes(out),
                         answered, timed_out, unanswered)
+        if not self.nolog:
+            self.transcript.append(self.secrets.text(result.text))
         _log_end(seq, argv, result, time.monotonic() - t0, shown=echo_to is not None or bool(logf_out),
                  quiet=quiet, secrets=self.secrets)
         return result

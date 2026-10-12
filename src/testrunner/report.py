@@ -40,6 +40,11 @@ class StepRun:
     seconds: float
     detail: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
+    attempt: str = ""            # "2/3" for a retried step: one row per attempt
+
+    @property
+    def label(self) -> str:
+        return f"{self.id} (attempt {self.attempt})" if self.attempt else self.id
 
 
 @dataclass
@@ -93,7 +98,7 @@ def runs_from_journal(store: Store) -> list[RunRecord]:
             start, _ = open_steps.pop((rid, e["step"]), (_t(e), None))
             run.steps.append(StepRun(e["step"], e.get("action", e["step"]), e.get("outcome", "?"), start,
                                      float(e.get("seconds") or (_t(e) - start).total_seconds()),
-                                     e.get("detail", ""), e.get("metrics") or {}))
+                                     e.get("detail", ""), e.get("metrics") or {}, e.get("attempt", "")))
         elif ev == "step_skip":
             run.steps.append(StepRun(e["step"], e.get("action", e["step"]), "skipped", _t(e), 0.0,
                                      e.get("why", "")))
@@ -178,7 +183,7 @@ def render(runs: list[RunRecord], run_id: str | None = None, title: str = "") ->
         st = STATUS.get(s.outcome, "warning")
         tip = esc(json.dumps({"step": s.id, "outcome": s.outcome, "starts": "+" + _dur(off),
                               "took": _dur(s.seconds), **{k: v for k, v in s.metrics.items()}}))
-        svg.append(f'<text class="lbl" x="{label_w - 8}" y="{y + bar_h - 1}" text-anchor="end">{esc(s.id)}</text>'
+        svg.append(f'<text class="lbl" x="{label_w - 8}" y="{y + bar_h - 1}" text-anchor="end">{esc(s.label)}</text>'
                    f'<rect class="hit" x="{label_w}" y="{y - 4}" width="{plot_w + 70}" height="{row_h}" data-tip="{tip}"/>'
                    f'<rect class="bar s-{st}" x="{x:.1f}" y="{y}" width="{w:.1f}" height="{bar_h}" rx="3"/>'
                    f'<text class="val" x="{x + w + 6:.1f}" y="{y + bar_h - 1}">{ICON[st]} {_dur(s.seconds)}</text>')
@@ -213,7 +218,7 @@ def render(runs: list[RunRecord], run_id: str | None = None, title: str = "") ->
                 word = "slower" if ch >= 0 else "faster"
             tip = esc(json.dumps({"step": s.id, "this run": _dur(s.seconds), f"median of {n} earlier": _dur(med),
                                   "change": f"{ch * 100:+.0f}% ({word})"}))
-            c.append(f'<text class="lbl" x="{label_w - 8}" y="{y + bar_h - 1}" text-anchor="end">{esc(s.id)}</text>'
+            c.append(f'<text class="lbl" x="{label_w - 8}" y="{y + bar_h - 1}" text-anchor="end">{esc(s.label)}</text>'
                      f'<rect class="hit" x="{label_w}" y="{y - 4}" width="{plot_w + 70}" height="{row_h}" data-tip="{tip}"/>'
                      f'<rect class="bar {cls}" x="{x:.1f}" y="{y}" width="{max(w, 2):.1f}" height="{bar_h}" rx="3"/>'
                      f'<text class="val" x="{(mid + w + 6) if ch >= 0 else (mid - w - 6):.1f}" y="{y + bar_h - 1}" '
@@ -230,7 +235,7 @@ def render(runs: list[RunRecord], run_id: str | None = None, title: str = "") ->
               if med and med >= MIN_SECONDS and s.seconds >= MIN_SECONDS and s.outcome == "passed" else "")
         st = STATUS.get(s.outcome, "warning")
         rows.append("<tr>" + "".join([
-            f"<td>{esc(s.id)}</td>",
+            f"<td>{esc(s.label)}</td>",
             f'<td><span class="pill s-{st}">{ICON[st]}</span> {esc(s.outcome)}</td>',
             f'<td class="num">+{_dur((s.start - run.start).total_seconds())}</td>',
             f'<td class="num">{_dur(s.seconds)}</td>',
@@ -390,7 +395,7 @@ def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Sto
         ch = (f"{(s.seconds - med) / med * 100:+.0f}%"
               if med and med >= MIN_SECONDS and s.seconds >= MIN_SECONDS and s.outcome == "passed" else "")
         st = STATUS.get(s.outcome, "warning")
-        out.append(f"| {_md(s.id)} | {MD_ICON[st]} {_md(s.outcome)} | +{_dur((s.start - run.start).total_seconds())} "
+        out.append(f"| {_md(s.label)} | {MD_ICON[st]} {_md(s.outcome)} | +{_dur((s.start - run.start).total_seconds())} "
                    f"| {_dur(s.seconds)} | {_dur(med) + f' (n={n})' if med else ''} | {ch} | "
                    + "".join(f"{_md(s.metrics.get(k, ''))} | " for k in metric_keys))
     out.append("")
@@ -412,7 +417,7 @@ def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Sto
     if bad:
         out += ["## Not as expected", ""]
         for s in bad:
-            out += [f"### {MD_ICON[STATUS.get(s.outcome, 'warning')]} {s.id}: {s.outcome}", ""]
+            out += [f"### {MD_ICON[STATUS.get(s.outcome, 'warning')]} {s.label}: {s.outcome}", ""]
             if s.detail:
                 out += [f"> {_md(s.detail)}", ""]
             tail = _log_tail(store, s.id) if store is not None else ""

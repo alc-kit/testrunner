@@ -139,6 +139,37 @@ an edit whose anchor is not in the run is dropped with a note. The edits are par
 source in `--plan`, the banner, the journal and the report:
 `steps: plan of qdevice.yml (via x.yml); edits: +ping-after-join (again ping) after join, -cache-verify`.
 
+**Retry, on evidence.** A step can be retried, as a walk edit or as `retry:` on the step in a
+path. It is retried only when the evidence says a retry can help:
+```yaml
+edit:
+  - retry: install               # a step id
+    times: 2                     # at most 2 more attempts
+    delay: 60                    # seconds before each
+    if:                          # ALL must hold (outcome defaults to [failed, errored])
+      outcome: [failed, errored]
+      detail: "regex"            #   on the outcome's detail
+      output: "Could not get lock|Temporary failure resolving"   # what the attempt printed
+      state: {rig: up}           #   the OBSERVED state after the attempt
+      probe: apt-reachable       #   a read-only action, run now; must pass
+    unless:                      # ANY match: no retry (same keys)
+      output: "No space left on device"
+```
+A step that ended as the plan expected, was skipped by `when`, or was aborted is never retried.
+`requires` is checked again before each attempt, and the step's outcome is the last
+attempt's. The journal records every attempt (`step_start`/`step_end` with `attempt: 2/3`) and
+every decision with its evidence (`step_retry`, `step_no_retry`: `no retry after attempt 1/3
+(failed): outcome failed; output did not match 'Could not get lock'`). The reports show one row
+per attempt. A probe runs as its own step (`install~probe1`), so its evidence is in the journal
+too. `on:`/`goto` stay for real branching.
+
+**Redo.** `--from STEP` starts the compiled walk (plan, edits and all) at STEP; `--resume` starts
+it at the step the last run stopped at (refused when the last run passed, or when that step is no
+longer on the walk). `on:`/`expect:` naming a step left out are dropped with a note. One-run edits
+mirror `edit:` and are notes, never errors, when a name is not on the walk:
+`--skip STEP`, `--repeat STEP@after:ID`, `--insert ACTION@before:ID`, `--retry STEP=TIMES[:DELAY]`
+(evidence conditions belong in a config's `edit:`).
+
 **`all` vs the plan.** On the command line, `all` means the run config's plan: it compiles
 exactly like a bare `testrunner`, `with`/`detours`/`on`/`expect` included. When the plan is
 empty, `all` runs the runner config's `all.fallback` path instead (with the plan's other keys,
@@ -281,6 +312,8 @@ testrunner                       run the run config's plan
 testrunner all                   the same; an empty plan runs the all.fallback path
 testrunner a..c d                run these steps (actions, paths, ranges), in order
 testrunner --plan [steps]        validate and print the walk; run nothing
+testrunner --from STEP | --resume    start the walk at STEP / where the last run stopped
+testrunner --skip S --repeat S@after:ID --insert A@before:ID --retry S=N[:DELAY]   one-run edits
 testrunner --list | --status | --scenario | --select -c NAME | --release | --report-of RUN
   --report  --report-format md|html|both
   -c/--config NAME   -w/--with key=value   --color MODE   --non-interactive   --root DIR

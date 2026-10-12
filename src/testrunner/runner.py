@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import string
 import sys
 import time
@@ -105,6 +106,7 @@ class RunContext(Background):
         self.state: dict[str, Any] = {}
         self.results: list[StepResult] = []
         self.current: StepContext | None = None
+        self.last_output = ""        # what the last executed step printed (retry evidence)
 
     def nolog(self, value: Any) -> Any:
         """Mark a value NOLOG from here on (e.g. a password an action generated); returns it."""
@@ -282,7 +284,27 @@ class Runner:
                     break
                 token = STEP.set(step.id)
                 try:
-                    sr = await self._step(run, run_scope, step, index, data)
+                    sr = await self._step(run, run_scope, step, index, data,
+                                          attempt=f"1/{1 + step.retry['times']}" if step.retry else "")
+                    attempt = 1
+                    while step.retry and not self._aborted:
+                        again, why = await self._retry_wanted(run, run_scope, step, sr, attempt, index, data)
+                        if not again:
+                            if why:
+                                log.info("%s: %s", step.id, why)
+                                self.journal("step_no_retry", step=step.id, attempt=attempt, why=why)
+                                self.say(self.style.dim(f"     {why}"))
+                            break
+                        attempt += 1
+                        total = 1 + step.retry["times"]
+                        log.info("%s: %s", step.id, why)
+                        self.journal("step_retry", step=step.id, attempt=attempt, of=total, why=why,
+                                     delay=step.retry["delay"])
+                        self.say(self.style.warn(f"     {why}"
+                                                 + (f"; in {step.retry['delay']:g}s" if step.retry["delay"] else "")))
+                        if step.retry["delay"]:
+                            await asyncio.sleep(step.retry["delay"])
+                        sr = await self._step(run, run_scope, step, index, data, attempt=f"{attempt}/{total}")
                 finally:
                     STEP.reset(token)
                 if self._aborted:
@@ -373,7 +395,56 @@ class Runner:
             raise FixtureError(f"observer for {var} returned {value!r}, not one of {self.rc.states[var]['values']}")
         return value
 
-    async def _step(self, run: RunContext, run_scope: Scope, step: Step, index: int, data: dict) -> StepResult:
+    async def _retry_wanted(self, run: RunContext, run_scope: Scope, step: Step, sr: StepResult, attempt: int,
+                            index: int, data: dict) -> tuple[bool, str]:
+        """(retry?, why): the retry spec's evidence, judged on the attempt that just ended."""
+        spec = step.retry
+        total = 1 + spec["times"]
+        if sr.outcome == SKIPPED or sr.outcome == run.program.expected(step.id).outcome:
+            return False, ""                    # skipped by `when`, or it ended as the plan expected
+        if sr.outcome == ABORTED:
+            return False, f"no retry: attempt {attempt}/{total} was aborted by the operator"
+        if attempt >= total:
+            return False, f"no retry: attempt {attempt}/{total} was the last ({sr.outcome})"
+
+        async def holds(ev: dict, part: str) -> tuple[bool, list[str]]:
+            """if: ALL keys hold; unless: (returns) which keys matched. Cheap evidence first."""
+            seen: list[str] = []
+            for key in ("outcome", "detail", "output", "state", "probe"):
+                if key not in ev:
+                    continue
+                want = ev[key]
+                if key == "outcome":
+                    hit, txt = sr.outcome in want, f"outcome {sr.outcome}" + ("" if sr.outcome in want else f" not in {want}")
+                elif key in ("detail", "output"):
+                    text = sr.detail if key == "detail" else run.last_output
+                    hit = re.search(want, text or "", re.M) is not None
+                    txt = f"{key} {'matched' if hit else 'did not match'} {want!r}"
+                elif key == "state":
+                    bad = {k: run.state.get(k) for k, v in want.items()
+                           if run.state.get(k) not in (v if isinstance(v, list) else [v])}
+                    hit, txt = not bad, f"observed state {'is' if not bad else 'is not'} {want}" + (f" ({bad})" if bad else "")
+                else:
+                    probe = Step(f"{step.id}~probe{attempt}{'' if part == 'if' else '-unless'}", want)
+                    psr = await self._step(run, run_scope, probe, index, data)
+                    hit, txt = psr.outcome == PASSED, f"probe {want} {psr.outcome}"
+                seen.append(txt)
+                if part == "if" and not hit:
+                    return False, seen
+                if part == "unless" and hit:
+                    return True, seen
+            return part == "if", seen
+
+        ok, why_if = await holds(spec["if"], "if")
+        if not ok:
+            return False, f"no retry after attempt {attempt}/{total} ({sr.outcome}): {'; '.join(why_if)}"
+        vetoed, why_unless = await holds(spec["unless"], "unless") if spec["unless"] else (False, [])
+        if vetoed:
+            return False, f"no retry after attempt {attempt}/{total}: unless {why_unless[-1]}"
+        return True, f"retry {attempt + 1}/{total}: {'; '.join(why_if)}"
+
+    async def _step(self, run: RunContext, run_scope: Scope, step: Step, index: int, data: dict,
+                    attempt: str = "") -> StepResult:
         rc = self.rc
         act = self.reg.actions[step.action]
         params = deep_merge(data.get(rc.params_section) or {}, step.with_)
@@ -401,8 +472,11 @@ class Runner:
             run.current = None
             return sr
         self.say("\n" + self.style.banner(f"==== [{index}] {step.id}"
-                                         + (f" ({act.name})" if act.name != step.id else "") + " ===="))
-        self.journal("step_start", step=step.id, action=act.name, params=params)
+                                         + (f" ({act.name})" if act.name != step.id else "")
+                                         + (f" attempt {attempt}" if attempt else "") + " ===="))
+        self.journal("step_start", step=step.id, action=act.name, params=params,
+                     **({"attempt": attempt} if attempt else {}))
+        run.last_output = ""
         await self.hook("step_start", run=run, step=ctx)
         ok, unknown = requires_holds(act.requires, run.state)
         log.info("%s: requires %s against state %s -> %s", step.id, act.requires or "{}", run.state,
@@ -428,6 +502,7 @@ class Runner:
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
             outcome = await self._execute(act, scope, ctx, step_data)
+            run.last_output = "\n".join(proc.transcript)
             log.info("%s: the action ended %s%s (%.1fs)", step.id, outcome.name,
                      f" — {outcome.detail}" if outcome.detail else "", time.monotonic() - started)
             problems = await ctx.finish()
@@ -484,10 +559,10 @@ class Runner:
         await self.hook("step_end", run=run, step=ctx, result=sr)
         self.journal("step_end", step=step.id, action=act.name, outcome=outcome.name,
                      detail=outcome.detail, seconds=round(sr.seconds, 1), state=run.state,
-                     metrics=ctx.metrics)
+                     metrics=ctx.metrics, **({"attempt": attempt} if attempt else {}))
         as_expected = outcome.name == expect.outcome
         mark = "" if as_expected else f"  (expected {expect.outcome})"
-        line = (f"---- {step.id}: {outcome.name}{mark} ({sr.seconds:.1f}s)"
+        line = (f"---- {step.id}{f' attempt {attempt}' if attempt else ''}: {outcome.name}{mark} ({sr.seconds:.1f}s)"
                 + (f" — {outcome.detail}" if outcome.detail else ""))
         self.say(self.style.ok(line) if as_expected else self.style.bad(line))
         return sr

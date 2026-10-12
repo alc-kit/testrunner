@@ -59,6 +59,19 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--config", "-c", help="run config name (configs/<name>) or file")
     p.add_argument("--with", "-w", dest="with_", action="append", default=[], metavar="KEY=VALUE",
                    help="override a parameter for this run (repeatable)")
+    w = p.add_argument_group("editing the walk for this run (notes, never errors, when a name is not on it)")
+    start = w.add_mutually_exclusive_group()
+    start.add_argument("--from", dest="from_", metavar="STEP",
+                       help="start the walk (the plan, or the steps given) at STEP")
+    start.add_argument("--resume", action="store_true",
+                       help="start at the step the last run stopped at (refused if it passed)")
+    w.add_argument("--skip", action="append", default=[], metavar="STEP", help="leave STEP out (repeatable)")
+    w.add_argument("--repeat", action="append", default=[], metavar="STEP@after:ID",
+                   help="run STEP again after (or @before:) ID (repeatable)")
+    w.add_argument("--insert", action="append", default=[], metavar="ACTION@after:ID",
+                   help="insert ACTION after (or @before:) ID (repeatable)")
+    w.add_argument("--retry", action="append", default=[], metavar="STEP=TIMES[:DELAY]",
+                   help="retry STEP up to TIMES more times on failed/errored (evidence conditions: edit: in a config)")
     p.add_argument("--root", type=Path, default=Path.cwd(), help="where to look for testrunner.yml")
     p.add_argument("--color", choices=["auto", "always", "never"], default="auto")
     p.add_argument("--non-interactive", action="store_true",
@@ -87,6 +100,55 @@ def parser() -> argparse.ArgumentParser:
                         "(cd + environment + argv; also TESTRUNNER_SHOW_COMMANDS=1)")
     p.add_argument("--version", action="version", version=f"testrunner {__version__}")
     return p
+
+
+def cli_edits(args: argparse.Namespace) -> list[dict]:
+    """The one-run walk edits, as `edit:` entries (applied after the config's)."""
+    out: list[dict] = []
+
+    def placed(spec: str, flag: str) -> tuple[str, str, str]:
+        name, sep, where = spec.partition("@")
+        rel, sep2, anchor = where.partition(":")
+        if not (name and sep and sep2 and anchor and rel in ("after", "before")):
+            raise ConfigError(f"{flag} {spec!r}: want NAME@after:ID or NAME@before:ID")
+        return name, rel, anchor
+
+    for s in args.skip:
+        out.append({"skip": s})
+    for spec in args.repeat:
+        name, rel, anchor = placed(spec, "--repeat")
+        out.append({"repeat": name, rel: anchor})
+    for spec in args.insert:
+        name, rel, anchor = placed(spec, "--insert")
+        out.append({"insert": [name], rel: anchor})
+    for spec in args.retry:
+        name, sep, rest = spec.partition("=")
+        times, _, delay = rest.partition(":")
+        try:
+            out.append({"retry": name, "times": int(times), "delay": float(delay or 0)})
+        except ValueError:
+            raise ConfigError(f"--retry {spec!r}: want STEP=TIMES or STEP=TIMES:DELAY") from None
+        if not (name and sep):
+            raise ConfigError(f"--retry {spec!r}: want STEP=TIMES or STEP=TIMES:DELAY")
+    return out
+
+
+def resume_point(store: Store) -> str:
+    """The step the last run stopped at: the last step it started (probes aside)."""
+    events = list(store.journal.read())
+    starts = [i for i, e in enumerate(events) if e["event"] == "run_start"]
+    if not starts:
+        raise ConfigError(f"--resume: no runs recorded in {store.root}")
+    last = events[starts[-1]:]
+    end = next((e for e in last if e["event"] == "run_end"), None)
+    if end is not None and end.get("passed"):
+        raise ConfigError(f"--resume: the last run ({last[0].get('run', '?')}) passed; there is nothing to resume")
+    started = [e["step"] for e in last if e["event"] == "step_start" and "~probe" not in e["step"]]
+    if not started:
+        raise ConfigError(f"--resume: the last run ({last[0].get('run', '?')}) started no step")
+    why = (end or {}).get("why") or "no end recorded (killed?)"
+    log.info("--resume: the last run %s stopped at %s (%s)", last[0].get("run", "?"), started[-1], why)
+    return started[-1]
 
 
 def terminal_level(args: argparse.Namespace) -> int | None:
@@ -177,8 +239,12 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
             log.info("--with for this run: %s", with_)
         sel = select(rc, store, args.config, claim=False, run_id=run_id)
         logs.secrets = Secrets(values_at(sel.run_config.data, sel.run_config.nolog_paths))
+        edits_now = cli_edits(args)
+        start_at = resume_point(store) if args.resume else args.from_
+        if args.resume:
+            print(style.dim(f"resuming at {start_at} (where the last run stopped)"))
         prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of,
-                                sel.run_config.data.get("edit"))
+                                sel.run_config.data.get("edit"), edits_now, start_at)
         readonly = all(reg.actions[s.action].readonly for s in prog.steps())
         log.info("%s: %s", "read-only run (no writer lock, no state written)" if readonly
                  else "state-changing run", ", ".join(f"{s.id}={reg.actions[s.action].kind}"
@@ -191,7 +257,7 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
                 log.warning("a parallel runner selected the scenario first; recompiling against %s",
                             describe(sel.scenario))
                 prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of,
-                                        sel.run_config.data.get("edit"))
+                                        sel.run_config.data.get("edit"), edits_now, start_at)
         elif sel.scenario is None:
             log.info("no scenario selected and none claimed (%s)",
                      "--plan" if args.plan else "read-only" if readonly else "nothing to run")
