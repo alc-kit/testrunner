@@ -177,7 +177,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
             log.info("--with for this run: %s", with_)
         sel = select(rc, store, args.config, claim=False, run_id=run_id)
         logs.secrets = Secrets(values_at(sel.run_config.data, sel.run_config.nolog_paths))
-        prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of)
+        prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of,
+                                sel.run_config.data.get("edit"))
         readonly = all(reg.actions[s.action].readonly for s in prog.steps())
         log.info("%s: %s", "read-only run (no writer lock, no state written)" if readonly
                  else "state-changing run", ", ".join(f"{s.id}={reg.actions[s.action].kind}"
@@ -189,7 +190,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
             if not sel.claimed:    # a parallel runner selected first: compile against ITS config
                 log.warning("a parallel runner selected the scenario first; recompiling against %s",
                             describe(sel.scenario))
-                prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of)
+                prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of,
+                                        sel.run_config.data.get("edit"))
         elif sel.scenario is None:
             log.info("no scenario selected and none claimed (%s)",
                      "--plan" if args.plan else "read-only" if readonly else "nothing to run")

@@ -260,6 +260,13 @@ def resolve_config_file(rc: RunnerConfig, name: str | None) -> tuple[Path | None
     return None, "none"
 
 
+def _edits(path: Path, data: dict) -> list:
+    e = data.get("edit") or []
+    if not isinstance(e, list):
+        raise ConfigError(f"{path}: edit: want a list of edits (repeat/insert/skip/replace)")
+    return copy.deepcopy(e)
+
+
 def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
     file, how = resolve_config_file(rc, name)
     if file is None:
@@ -294,6 +301,10 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
         log.debug("%s extends %s", p.name, cand)
         base = load(cand)
         merged = deep_merge(base, data)
+        # Walk edits ACCUMULATE: the parent's first, then this file's (a child edits the
+        # inherited plan without restating it)
+        if "edit" in data or "edit" in base:
+            merged["edit"] = _edits(cand, base) + _edits(p, data)
         # A plan is a whole: a child that states one replaces the parent's.
         if "plan" in data:
             merged["plan"] = copy.deepcopy(data["plan"])
