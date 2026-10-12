@@ -248,7 +248,7 @@ class Runner:
                  [s.id for s in program.main])
         run.state = state
         result = RunResult(True, run.results)
-        self.journal("run_start", config=str(self.run_config.file or ""),
+        self.journal("run_start", config=str(self.run_config.file or ""), source=program.source,
                                   steps=[s.id for s in program.main], state=state, pid=os.getpid(),
                      readonly=self.readonly)
         try:

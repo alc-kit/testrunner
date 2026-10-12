@@ -55,7 +55,7 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="testrunner", description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 epilog=__doc__.split("\n\n", 1)[1])
-    p.add_argument("steps", nargs="*", help="actions, paths or ranges (a..b); none = the plan")
+    p.add_argument("steps", nargs="*", help="actions, paths or ranges (a..b); none or `all` = the plan")
     p.add_argument("--config", "-c", help="run config name (configs/<name>) or file")
     p.add_argument("--with", "-w", dest="with_", action="append", default=[], metavar="KEY=VALUE",
                    help="override a parameter for this run (repeatable)")
@@ -177,7 +177,7 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
             log.info("--with for this run: %s", with_)
         sel = select(rc, store, args.config, claim=False, run_id=run_id)
         logs.secrets = Secrets(values_at(sel.run_config.data, sel.run_config.nolog_paths))
-        prog = compiler.compile(sel.run_config.plan, args.steps or None, with_)
+        prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of)
         readonly = all(reg.actions[s.action].readonly for s in prog.steps())
         log.info("%s: %s", "read-only run (no writer lock, no state written)" if readonly
                  else "state-changing run", ", ".join(f"{s.id}={reg.actions[s.action].kind}"
@@ -189,7 +189,7 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
             if not sel.claimed:    # a parallel runner selected first: compile against ITS config
                 log.warning("a parallel runner selected the scenario first; recompiling against %s",
                             describe(sel.scenario))
-                prog = compiler.compile(sel.run_config.plan, args.steps or None, with_)
+                prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of)
         elif sel.scenario is None:
             log.info("no scenario selected and none claimed (%s)",
                      "--plan" if args.plan else "read-only" if readonly else "nothing to run")
@@ -206,8 +206,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
         print(style.bad(f"ERROR: {e}"), file=sys.stderr)
         return EXIT_USAGE
     if not prog.main:
-        print(style.bad(f"ERROR: nothing to run: give steps, or a run config with a plan "
-                        f"({run_config.file or 'no run config found'})"), file=sys.stderr)
+        print(style.bad(f"ERROR: nothing to run: give steps{', `all`' if rc.all_fallback else ''}, or a run "
+                        f"config with a plan ({run_config.file or 'no run config found'})"), file=sys.stderr)
         return EXIT_USAGE
     data = deep_merge(run_config.data, {rc.params_section: prog.params})
     state0 = initial_state(rc, store.get_state())
@@ -248,7 +248,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
     for e in v.errors:
         print(style.bad(f"error: {e}"))
     if args.plan:
-        print(style.banner(f"plan of {src}: {len(v.walk)} step(s) on the expected walk"))
+        print(style.banner(f"steps: {prog.source}"))
+        print(f"run config {src}: {len(v.walk)} step(s) on the expected walk")
         for i, sid in enumerate(v.walk, 1):
             print(f"  {i:>3}  {sid}")
         for sid, by in prog.reactions.items():
@@ -260,7 +261,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
         log.error("the static check refused the plan: %s", "; ".join(v.errors))
         print(style.bad("ERROR: the plan cannot run as written (see above); nothing was started"), file=sys.stderr)
         return EXIT_USAGE
-    print(style.banner(f"plan of {src}: {' > '.join(v.walk)}"))
+    print(style.banner(f"steps: {prog.source}"))
+    print(f"run config {src}: {' > '.join(v.walk)}")
     if logs.file:
         print(style.dim(f"trace: {_rel(logs.file)}  (every decision; -v/-vv shows it here)"))
     try:
