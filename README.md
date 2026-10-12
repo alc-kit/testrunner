@@ -118,6 +118,50 @@ By default the walk is linear: a step that ends as expected continues, anything 
 stops the run and leaves the system as it is. Steps can also carry `when:` (a condition
 on the config) and `max_visits:` (a bound for `goto` loops).
 
+## State machine
+
+A run is a walk over a state machine. Every part of it is declared, and `--plan --matrix`
+prints the whole of it as a table, which also goes in the journal and both reports.
+
+- **States**: the runner config's `states:` (e.g. `rig: [absent, up, installed, clustered]`).
+  Observers read the real value, and it wins over the model.
+- **Events**: a step's outcome: `passed`, `failed`, `errored`, `aborted`, `skipped`, or a named
+  one the action declares (`outcomes=["degraded"]`).
+- **Guards**: an action's `requires` (the states it may start from). Checked before it runs, and
+  statically over every branch before the run starts.
+- **Effects**: an action's `produces` (on `passed`) and `produces_on` (per outcome): the state it
+  leaves. The observers then read what it really left.
+- **Transitions**: what comes next, decided by how the step ENDED. Two forms:
+  ```yaml
+  on:
+    verify: {failed: stop}             # by outcome only: continue | stop | {goto: id} | [steps]
+    join:                              # rules on outcome AND the observed state; first match wins
+      - when: {outcome: passed, state: {rig: clustered}}   # the marker that means "go on"
+        then: continue
+      - when: {outcome: passed, state: {rig: installed}}   # joined, but no cluster formed
+        then: {goto: form}
+      - when: {outcome: failed}
+        then: [membership]                                 # run these, then go on
+      # no rule matches: the run stops, failed
+  ```
+  - A step with no `on:` continues when it ends with its expected outcome (`expect:`, default
+    `passed`), and stops the run otherwise.
+  - The outcome-only form keeps that default for outcomes it does not list. A rule list does
+    not: what it does not match stops the run.
+  - A config re-routes an inherited plan with the walk edit
+    `{transition: join, rules: [...]}`, which replaces that step's rules.
+  - The static check follows every rule's branch, including a state only an observer can
+    report.
+
+```
+$ testrunner --plan --matrix
+  step | requires (state in)    | outcome (event) | state after    | next
+  -----+------------------------+-----------------+----------------+-------------------------------------
+  join | rig: installed|clustered | passed*       | rig: clustered | outcome passed rig=clustered -> continue; outcome passed rig=installed -> goto form; otherwise -> stop (failed)
+       |                        | failed          | (unchanged)    | outcome failed -> run membership, then go on; otherwise -> stop (failed)
+       |                        | aborted         | (unchanged)    | stop (aborted)
+```
+
 **Editing a walk.** A run config's `edit:` list changes the walk its plan compiles to, without
 restating the plan: in order, each edit anchored on a step id. Edits **accumulate through
 `extends:`** (the parent's first), so a child config adds a test to the walk it inherits:

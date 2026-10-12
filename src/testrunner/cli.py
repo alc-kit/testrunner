@@ -39,7 +39,7 @@ from .discovery import collect
 from .fixtures import FixtureError
 from .log import ENV_LEVEL, Logs, level_of
 from .nolog import Secrets, values_at
-from .planner import Compiler, initial_state, simulate
+from .planner import Compiler, initial_state, matrix, matrix_text, reaction_text, simulate
 from .runner import Runner
 from .scenario import describe, new_run_id, select
 from .store import LockedError, Store
@@ -78,6 +78,9 @@ def parser() -> argparse.ArgumentParser:
                    help="never ask the operator; an unanswered prompt fails its step")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--plan", action="store_true", help="validate and print the walk, run nothing")
+    p.add_argument("--matrix", action="store_true",
+                   help="also print the state/event matrix: per step and outcome, the state in and after, and what "
+                        "comes next")
     g.add_argument("--list", action="store_true", help="list actions, paths, fixtures, observers")
     g.add_argument("--status", action="store_true", help="the last run, from the store")
     g.add_argument("--scenario", action="store_true", help="show the scenario in force")
@@ -324,6 +327,13 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
             for outcome, r in by.items():
                 tgt = r.target if r.kind == "goto" else ", ".join(s.id for s in prog.segments.get(r.segment or "", []))
                 print(f"       on {sid} {outcome}: {r.kind}{' ' + tgt if tgt else ''}")
+        for sid, rules in prog.rules.items():
+            for r in rules:
+                print(f"       on {sid} {r.text}: {reaction_text(prog, r.reaction)}")
+            print(f"       on {sid} otherwise: stop (failed)")
+        if args.matrix:
+            print(style.banner("state/event matrix (* = the expected outcome)"))
+            print("\n".join(matrix_text(matrix(prog, reg))))
         return EXIT_USAGE if v.errors else 0
     if v.errors:
         log.error("the static check refused the plan: %s", "; ".join(v.errors))
@@ -331,6 +341,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
         return EXIT_USAGE
     print(style.banner(f"steps: {prog.source}"))
     print(f"run config {src}: {' > '.join(v.walk)}")
+    if args.matrix:
+        print("\n".join(matrix_text(matrix(prog, reg))))
     if logs.file:
         print(style.dim(f"trace: {_rel(logs.file)}  (every decision; -v/-vv shows it here)"))
     try:

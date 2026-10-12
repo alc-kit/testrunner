@@ -52,6 +52,7 @@ class RunRecord:
     id: str
     start: datetime
     config: str = ""
+    matrix: list = field(default_factory=list)   # the state/event matrix the run started with
     source: str = ""            # where the steps came from ("plan of x.yml", "all = path full: no plan in x.yml")
     end: datetime | None = None
     passed: bool | None = None
@@ -86,7 +87,8 @@ def runs_from_journal(store: Store) -> list[RunRecord]:
         if ev == "run_start":
             rid = e.get("run") or f"run{n}"
             current = rid
-            runs[rid] = RunRecord(rid, _t(e), config=e.get("config", ""), source=e.get("source", ""))
+            runs[rid] = RunRecord(rid, _t(e), config=e.get("config", ""), source=e.get("source", ""),
+                                  matrix=e.get("matrix") or [])
             order.append(rid)
             continue
         run = runs.get(rid)
@@ -318,7 +320,7 @@ th {{ color:var(--ink2); font-weight:600; }} td.num {{ text-align:right; font-va
   f'<div class="card">{comp_svg}</div><p class="note">Change against the median of the last {HISTORY} passed runs of the same step; steps under {MIN_SECONDS:.0f}s are not compared. Bars stop at ±{lim * 100:.0f}%; the table has the exact numbers.</p>')
  if comp_svg else '<p class="note">No earlier passed run of these steps in this journal yet.</p>'}
 <h2>All numbers</h2>
-<div class="card"><table><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>
+<div class="card"><table><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>{_matrix_html(run)}
 <p class="note">Built from {esc(str(len(runs)))} run(s) in the journal by testrunner.</p>
 </main><div id="tip"></div>
 <script>
@@ -361,6 +363,16 @@ def _log_tail(store: Store, step_id: str) -> str:
         return ""
     lines = [ln for ln in data.splitlines() if ln.strip()]
     return "\n".join(lines[-LOG_TAIL:])
+
+
+def _matrix_html(run: "RunRecord") -> str:
+    if not run.matrix:
+        return ""
+    head = "".join(f"<th>{h}</th>" for h in ("step", "requires (state in)", "outcome (event)", "state after", "next"))
+    body = "".join("<tr>" + "".join(f"<td>{html.escape(r[k])}</td>" for k in ("step", "requires", "outcome", "after", "next"))
+                   + "</tr>" for r in run.matrix)
+    return (f'\n<h2>State/event matrix</h2>\n<p>* marks the expected outcome.</p>\n'
+            f'<div class="card"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>')
 
 
 def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Store | None = None) -> str:
@@ -413,6 +425,11 @@ def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Sto
             out.append(f"    {label} :{tag}, s{i}, {start}, {max(int(round(s.seconds)), 1)}s")
         out += ["```", ""]
 
+    if run.matrix:
+        out += ["## State/event matrix", "", "`*` marks the expected outcome.", "",
+                "| step | requires (state in) | outcome (event) | state after | next |", "|---|---|---|---|---|"]
+        out += [f"| {_md(r['step'])} | {_md(r['requires'])} | {_md(r['outcome'])} | {_md(r['after'])} | {_md(r['next'])} |"
+                for r in run.matrix] + [""]
     bad = [s for s in run.steps if STATUS.get(s.outcome, "warning") in ("critical", "serious", "warning")]
     if bad:
         out += ["## Not as expected", ""]
