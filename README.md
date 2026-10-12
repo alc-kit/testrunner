@@ -84,6 +84,8 @@ async def api(config):
 @observer("service")
 def service_state(api): return api.status()
 ```
+They are asked before the plan is judged, when the run starts, and after every step, whatever
+its outcome, except after a `readonly` action, which only looks.
 
 **Hooks**: `run_start`, `step_start`, `step_end`, `run_end` — `@hook("step_end")`; a
 hook receives only the arguments it names (`run`, `step`, `result`).
