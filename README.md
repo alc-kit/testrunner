@@ -163,6 +163,13 @@ every decision with its evidence (`step_retry`, `step_no_retry`: `no retry after
 per attempt. A probe runs as its own step (`install~probe1`), so its evidence is in the journal
 too. `on:`/`goto` stay for real branching.
 
+**Redo.** `--from STEP` starts the compiled walk (plan, edits and all) at STEP; `--resume` starts
+it at the step the last run stopped at (refused when the last run passed, or when that step is no
+longer on the walk). `on:`/`expect:` naming a step left out are dropped with a note. One-run edits
+mirror `edit:` and are notes, never errors, when a name is not on the walk:
+`--skip STEP`, `--repeat STEP@after:ID`, `--insert ACTION@before:ID`, `--retry STEP=TIMES[:DELAY]`
+(evidence conditions belong in a config's `edit:`).
+
 **`all` vs the plan.** On the command line, `all` means the run config's plan: it compiles
 exactly like a bare `testrunner`, `with`/`detours`/`on`/`expect` included. When the plan is
 empty, `all` runs the runner config's `all.fallback` path instead (with the plan's other keys,
@@ -305,6 +312,8 @@ testrunner                       run the run config's plan
 testrunner all                   the same; an empty plan runs the all.fallback path
 testrunner a..c d                run these steps (actions, paths, ranges), in order
 testrunner --plan [steps]        validate and print the walk; run nothing
+testrunner --from STEP | --resume    start the walk at STEP / where the last run stopped
+testrunner --skip S --repeat S@after:ID --insert A@before:ID --retry S=N[:DELAY]   one-run edits
 testrunner --list | --status | --scenario | --select -c NAME | --release | --report-of RUN
   --report  --report-format md|html|both
   -c/--config NAME   -w/--with key=value   --color MODE   --non-interactive   --root DIR

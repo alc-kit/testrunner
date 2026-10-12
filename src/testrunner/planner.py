@@ -252,9 +252,12 @@ class Compiler:
 
     def compile(self, plan: Any, cli_steps: list[str] | None = None,
                 cli_with: dict | None = None, plan_of: str = "the run config",
-                edits: list | None = None) -> Program:
+                edits: list | None = None, cli_edits: list | None = None,
+                start_at: str | None = None) -> Program:
         """`plan_of` names where the plan comes from (RunConfig.plan_of), for Program.source;
-        `edits` is the run config's `edit:` list."""
+        `edits` is the run config's `edit:` list (strict unless the steps are ad hoc);
+        `cli_edits` are this run's command-line edits (always notes, never errors);
+        `start_at` cuts the walk to begin at that step (--from / --resume)."""
         notes: list[str] = []
         if plan is None:
             plan = {}
@@ -318,8 +321,18 @@ class Compiler:
             log.info("%s: %s spliced %s %s", where, [s.id for s in new], "after" if "after" in d else "before",
                      anchor)
         done = self._apply_edits(edits, main, make, ids, adhoc, notes)
+        done += self._apply_edits(cli_edits, main, make, ids, True, notes, label="--edit")
         if done:
             source += f"; edits: {', '.join(done)}"
+        if start_at is not None:
+            idx = next((n for n, s in enumerate(main) if s.id == start_at), None)
+            if idx is None:
+                raise ConfigError(f"--from {start_at}: not a step on the walk "
+                                  f"(on it: {', '.join(s.id for s in main) or 'nothing'})")
+            if idx:
+                log.info("--from %s: the walk starts there; %s left out", start_at, [s.id for s in main[:idx]])
+            del main[:idx]
+            source += f"; from {start_at}"
         segments = {MAIN: main}
         reactions: dict[str, dict[str, Reaction]] = {}
         for sid, by_outcome in (plan.get("on") or {}).items():
@@ -344,7 +357,7 @@ class Compiler:
                 raise ConfigError(f"plan.expect.{sid}: want {{outcome: ..., state: {{...}}}}")
             expect[sid] = Expect(e.get("outcome", PASSED), dict(e.get("state") or {}))
         prog = Program(segments, reactions, expect, params, notes, source)
-        self._check_references(prog, adhoc)
+        self._check_references(prog, adhoc or start_at is not None)
         log.info("compiled: main %s", [f"{s.id}" + (f"(={s.action})" if s.action != s.id else "") for s in prog.main])
         for s in prog.steps():
             if s.with_ or s.when or s.max_visits != 1:
@@ -360,7 +373,7 @@ class Compiler:
         return prog
 
     def _apply_edits(self, edits: Any, main: list[Step], make, ids: _Ids, adhoc: bool,
-                     notes: list[str]) -> list[str]:
+                     notes: list[str], label: str = "edit") -> list[str]:
         """Apply the walk edits to `main` in place; return what was done, for the banner."""
         if edits is None:
             return []
@@ -368,7 +381,7 @@ class Compiler:
             raise ConfigError("edit: want a list of edits (repeat/insert/skip/replace)")
         done: list[str] = []
         for i, ed in enumerate(edits):
-            where = f"edit[{i}]"
+            where = f"{label}[{i}]"
             if not isinstance(ed, dict):
                 raise ConfigError(f"{where}: want a mapping with one of {', '.join(EDIT_OPS)}")
             ops = [k for k in ed if k in EDIT_OPS]
@@ -448,11 +461,15 @@ class Compiler:
                     raise ConfigError(f"plan.{label}: no step {sid!r} in the plan")
         for sid, by_outcome in prog.reactions.items():
             act = self.reg.actions[prog.step(sid).action]
-            for outcome, r in by_outcome.items():
+            for outcome, r in list(by_outcome.items()):
                 if outcome not in act.all_outcomes:
                     raise ConfigError(f"plan.on.{sid}: action {act.name!r} never ends {outcome!r} "
                                       f"(it declares {', '.join(sorted(act.all_outcomes))})")
                 if r.kind == "goto" and r.target not in main_ids:
+                    if adhoc:
+                        del by_outcome[outcome]
+                        prog.notes.append(f"plan.on.{sid}.{outcome} (goto {r.target!r}) dropped: not in this run")
+                        continue
                     raise ConfigError(f"plan.on.{sid}.{outcome}: goto {r.target!r} is not a step on the main path")
         for s in prog.steps():
             if s.retry:
