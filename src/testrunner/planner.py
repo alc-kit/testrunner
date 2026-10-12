@@ -64,7 +64,7 @@ class Program:
     expect: dict[str, Expect]
     params: dict[str, Any]
     notes: list[str] = field(default_factory=list)
-    # where the main path came from, for people: "plan of x.yml", "all = path full (...)", ...
+    # where the main path came from, for people: "plan of x.yml", "all = path full: ...", ...
     source: str = ""
 
     @property
@@ -216,7 +216,7 @@ class Compiler:
                 adhoc, path, source = False, plan.get("path"), f"all = plan of {plan_of}"
             elif self.rc.all_fallback:
                 fb = self.rc.all_fallback
-                adhoc, path, source = True, [fb], f"all = path {fb} ({plan_of} has no plan)"
+                adhoc, path, source = True, [fb], f"all = path {fb}: no plan in {plan_of}"
             else:
                 raise ConfigError(f"`all`: {plan_of} has no plan, and the runner config names no fallback "
                                   f"path (all: {{fallback: <path>}})")

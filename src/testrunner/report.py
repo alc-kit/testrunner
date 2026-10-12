@@ -47,7 +47,7 @@ class RunRecord:
     id: str
     start: datetime
     config: str = ""
-    source: str = ""            # where the steps came from ("plan of x.yml", "all = path full (...)")
+    source: str = ""            # where the steps came from ("plan of x.yml", "all = path full: no plan in x.yml")
     end: datetime | None = None
     passed: bool | None = None
     why: str = ""

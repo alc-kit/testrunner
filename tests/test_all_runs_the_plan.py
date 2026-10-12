@@ -40,6 +40,7 @@ CONFIGS = {
     "lean": "extends: default\nplan: {path: [], with: {k: v}, detours: [{after: two, steps: [four]}]}\n",
     "nested": "extends: default\nplan: [{stages: [all]}]\n",
     "ranged": "extends: default\nplan: ['all:one..two']\n",
+    "bare": "extends: default\nx: 1\n",                # inherits default's empty plan
 }
 
 
@@ -94,7 +95,13 @@ def test_a_plan_stated_by_the_config_itself_has_no_via(subscriber, capsys):
 def test_all_on_an_empty_plan_falls_back(subscriber, capsys):
     code, out, _ = run(subscriber, capsys, "-c", "default", "--plan", "all")
     assert code == 0 and walk(out) == ["one", "two", "three"]
-    assert "steps: all = path full (default.yml has no plan)" in out
+    assert "steps: all = path full: no plan in default.yml" in out
+
+
+def test_an_inherited_empty_plan_names_both_files_without_nesting(subscriber, capsys):
+    code, out, _ = run(subscriber, capsys, "-c", "bare", "--plan", "all")
+    assert code == 0 and walk(out) == ["one", "two", "three"]
+    assert "steps: all = path full: no plan in default.yml (via bare.yml)\n" in out
 
 
 def test_the_fallback_path_by_name_is_always_the_fixed_walk(subscriber, capsys):
@@ -138,7 +145,7 @@ def test_the_fallback_carries_the_plans_other_keys(subscriber):
     prog = compile_(subscriber, "lean", ["all"])
     assert [s.id for s in prog.main] == ["one", "two", "four", "three"]
     assert prog.params == {"k": "v"}
-    assert prog.source == "all = path full (lean.yml has no plan)"
+    assert prog.source == "all = path full: no plan in lean.yml"
 
 
 def test_all_on_an_empty_plan_without_a_fallback_is_refused(subscriber):

@@ -126,7 +126,7 @@ the run banner, the trace, the journal and `--report`:
 ```
 steps: plan of sdn.yml (via sdn+lvmthin.yml)          # bare run; the plan is inherited
 steps: all = plan of sdn.yml (via sdn+lvmthin.yml)
-steps: all = path full (default.yml has no plan)
+steps: all = path full: no plan in default.yml
 steps: path full (command line)
 steps: command line: up..join verify
 ```
