@@ -25,6 +25,13 @@ testrunner/bin/testrunner --list
 Update with `git subtree pull --prefix=testrunner … <tag> --squash`. Change testrunner
 in this repository, not in a subscriber's copy.
 
+Further reading:
+- `docs/extending.md`: building a test framework on testrunner. Where each kind of code goes,
+  designing the state model, and writing an extension.
+- `docs/real-hardware.md`: driving real machines (BMC, SSH, destructive steps), with the working
+  example `examples/bare-metal/`.
+- `docs/writing-actions.md`: writing one action, step by step.
+
 ## Concepts
 
 **States.** The subscriber declares variables that describe the system under test:

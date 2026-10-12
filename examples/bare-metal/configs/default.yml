@@ -1,0 +1,21 @@
+# The machine under test. Addresses are examples (RFC 5737); the password is NOLOG: it is
+# masked as ******** in the terminal, the trace, the journal and every command line shown.
+params:
+  node: server-a
+  host: 192.0.2.20                 # the OS's address (SSH)
+  bmc: 192.0.2.120                 # the BMC's address (IPMI over LAN)
+  bmc_user: admin
+  bmc_password: {NOLOG: change-me}
+
+# The walk: survey (read-only), power on, reinstall (destructive, behind a typed
+# confirmation), verify (read-only). `expect` makes the OBSERVER the judge of power-on: an
+# ipmitool call that exits 0 while the chassis stays off is a failure, not a pass.
+plan:
+  path: [lifecycle]
+  expect:
+    power-on: {state: {power: "on"}}
+edit:
+  - retry: power-on                # retried only on evidence a retry can help:
+    times: 2
+    delay: 10
+    if: {state: {power: "off"}}    #   the BMC still reports the chassis off

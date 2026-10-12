@@ -1,0 +1,19 @@
+# A bare-metal subscriber: one real server, driven through its BMC (IPMI) and SSH. Nothing
+# here is a VM: power and the operating system are READ from the machine by observers, and
+# every step's effect is judged by what they read, not by what the step claimed.
+# docs/real-hardware.md walks through it.
+modules: [actions/]
+state_dir: state
+params_section: params
+configs: {dir: configs, env: METAL_CONFIG, link: metal.yml}
+
+states:
+  power: {values: ["off", "on"]}                  # no `initial`: only the BMC knows
+  os:    {values: [absent, installed]}            # no `initial`: only the machine knows
+
+paths:
+  lifecycle: [survey, power-on, reinstall, verify]
+
+# one checkout drives one machine: the first state-changing run commits it to its config
+scenario:
+  release_when: {power: "off"}
