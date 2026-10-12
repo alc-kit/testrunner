@@ -20,6 +20,14 @@ to the compiled main path, each anchored on a step id:
   {insert: [steps...], after|before: <id>}           new steps
   {skip: <id> | [<id>...]}                           dropped from the walk
   {replace: <id>, by: [steps...]}                    one step out, these in, at its place
+  {retry: <id>, times: N, delay: S, if: {...}, unless: {...}}   retry it, on evidence (below)
+
+Retry (a walk edit, or `retry:` on a step in a path): after an attempt that did NOT end as the
+plan expected, and was not aborted, the step runs again (at most `times` more, `delay` seconds
+apart) when ALL of `if` hold and NONE of `unless` match. Evidence keys: outcome (names;
+`if` defaults to [failed, errored]), detail (regex on the outcome detail), output (regex on what
+the attempt printed), state (the OBSERVED state after it), probe (a read-only action that must
+pass / that passes).
 
 On the command line, `all` (alone) means the run config's plan, exactly as a bare run; when
 the plan is empty it means the runner config's `all.fallback` path. `all` is never a step
@@ -29,6 +37,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -40,7 +49,42 @@ log = logging.getLogger(__name__)
 
 MAIN = "main"
 REACTION_WORDS = ("continue", "stop")
-EDIT_OPS = {"repeat": {"after", "before", "id"}, "insert": {"after", "before"}, "skip": set(), "replace": {"by"}}
+EDIT_OPS = {"repeat": {"after", "before", "id"}, "insert": {"after", "before"}, "skip": set(), "replace": {"by"},
+            "retry": {"times", "delay", "if", "unless"}}
+RETRY_KEYS = {"times", "delay", "if", "unless"}
+EVIDENCE_KEYS = {"outcome", "detail", "output", "state", "probe"}
+DEFAULT_RETRY_ON = ["failed", "errored"]
+
+
+def retry_spec(spec: Any, where: str) -> dict[str, Any]:
+    """Check a retry spec's shape (names are checked against the registry later)."""
+    if not isinstance(spec, dict) or set(spec) - RETRY_KEYS:
+        raise ConfigError(f"{where}: retry takes {', '.join(sorted(RETRY_KEYS))}")
+    times = spec.get("times", 1)
+    if not isinstance(times, int) or isinstance(times, bool) or times < 1:
+        raise ConfigError(f"{where}: retry.times: want a whole number >= 1, got {times!r}")
+    delay = spec.get("delay", 0)
+    if not isinstance(delay, (int, float)) or isinstance(delay, bool) or delay < 0:
+        raise ConfigError(f"{where}: retry.delay: want seconds >= 0, got {delay!r}")
+    out = {"times": times, "delay": float(delay)}
+    for part in ("if", "unless"):
+        ev = spec.get(part) or {}
+        if not isinstance(ev, dict) or set(ev) - EVIDENCE_KEYS:
+            raise ConfigError(f"{where}: retry.{part} takes {', '.join(sorted(EVIDENCE_KEYS))}")
+        ev = dict(ev)
+        if "outcome" in ev:
+            ev["outcome"] = ev["outcome"] if isinstance(ev["outcome"], list) else [ev["outcome"]]
+        for k in ("detail", "output"):
+            if k in ev:
+                try:
+                    re.compile(ev[k])
+                except (re.error, TypeError) as e:
+                    raise ConfigError(f"{where}: retry.{part}.{k}: not a regular expression: {e}")
+        if "state" in ev and not isinstance(ev["state"], dict):
+            raise ConfigError(f"{where}: retry.{part}.state: want {{<state var>: value | [values]}}")
+        out[part] = ev
+    out["if"].setdefault("outcome", list(DEFAULT_RETRY_ON))
+    return out
 ALL = "all"
 
 
@@ -51,6 +95,7 @@ class Step:
     with_: dict[str, Any] = field(default_factory=dict)
     when: dict[str, Any] | None = None
     max_visits: int = 1
+    retry: dict[str, Any] | None = None
 
 
 @dataclass
@@ -148,14 +193,15 @@ class Compiler:
                     raise ConfigError(f"{where}: a stages group takes only stages/with, not {', '.join(sorted(unknown))}")
                 out += self.expand(e["stages"], deep_merge(w, e.get("with") or {}), depth + 1, where)
             elif isinstance(e, dict) and "action" in e:
-                unknown = set(e) - {"action", "id", "with", "when", "max_visits"}
+                unknown = set(e) - {"action", "id", "with", "when", "max_visits", "retry"}
                 if unknown:
                     raise ConfigError(f"{where}: step {e['action']!r}: unknown key(s) {', '.join(sorted(unknown))}")
                 name = e["action"]
                 if name not in self.reg.actions:
                     raise ConfigError(f"{where}: unknown action {name!r}")
                 out.append({"action": name, "id": e.get("id"), "with": deep_merge(w, e.get("with") or {}),
-                            "when": e.get("when"), "max_visits": int(e.get("max_visits", 1))})
+                            "when": e.get("when"), "max_visits": int(e.get("max_visits", 1)),
+                            "retry": retry_spec(e["retry"], f"{where}: step {name!r}") if "retry" in e else None})
             else:
                 raise ConfigError(f"{where}: cannot read step {e!r}")
         return out
@@ -175,7 +221,7 @@ class Compiler:
             log.debug("%s: path %r -> %s", where, name, [s["id"] or s["action"] for s in out])
             return out
         if name in self.reg.actions:
-            return [{"action": name, "id": None, "with": w, "when": None, "max_visits": 1}]
+            return [{"action": name, "id": None, "with": w, "when": None, "max_visits": 1, "retry": None}]
         raise ConfigError(f"{where}: {name!r} is neither an action nor a path")
 
     def _expand_range(self, spec: str, w: dict, depth: int, where: str) -> list[dict]:
@@ -250,7 +296,7 @@ class Compiler:
             out = []
             for e in entries:
                 sid = ids.take(e["id"] or e["action"], explicit=bool(e["id"]))
-                out.append(Step(sid, e["action"], e["with"], e["when"], e["max_visits"]))
+                out.append(Step(sid, e["action"], e["with"], e["when"], e["max_visits"], e["retry"]))
             return out
 
         main = make(self.expand(path, where="plan.path"))
@@ -355,7 +401,7 @@ class Compiler:
                         continue
                     s = main[src]
                     new = [Step(ids.take(ed.get("id") or s.id.split("#")[0], explicit=bool(ed.get("id"))), s.action,
-                                copy.deepcopy(s.with_), copy.deepcopy(s.when), s.max_visits)]
+                                copy.deepcopy(s.with_), copy.deepcopy(s.when), s.max_visits, copy.deepcopy(s.retry))]
                 else:
                     if at(anchor, "anchor") is None:
                         continue
@@ -366,6 +412,11 @@ class Compiler:
                 rel = "after" if "after" in ed else "before"
                 done += [f"+{n.id}" + (f" (again {ed['repeat']})" if op == "repeat" else "") + f" {rel} {anchor}"
                          for n in new]
+            elif op == "retry":
+                idx = at(ed["retry"], "step")
+                if idx is not None:
+                    main[idx].retry = retry_spec({k: v for k, v in ed.items() if k != "retry"}, where)
+                    done.append(f"retry {ed['retry']} x{main[idx].retry['times']}")
             elif op == "skip":
                 for sid in ed["skip"] if isinstance(ed["skip"], list) else [ed["skip"]]:
                     idx = at(sid, "step")
@@ -403,6 +454,9 @@ class Compiler:
                                       f"(it declares {', '.join(sorted(act.all_outcomes))})")
                 if r.kind == "goto" and r.target not in main_ids:
                     raise ConfigError(f"plan.on.{sid}.{outcome}: goto {r.target!r} is not a step on the main path")
+        for s in prog.steps():
+            if s.retry:
+                self._check_retry(s)
         for sid, e in prog.expect.items():
             act = self.reg.actions[prog.step(sid).action]
             if e.outcome not in act.all_outcomes:
@@ -410,6 +464,29 @@ class Compiler:
             for var, val in e.state.items():
                 if var not in self.rc.states or val not in self.rc.states[var]["values"]:
                     raise ConfigError(f"plan.expect.{sid}: {var}={val!r} is not a declared state value")
+
+
+    def _check_retry(self, s: Step) -> None:
+        act = self.reg.actions[s.action]
+        for part in ("if", "unless"):
+            ev = s.retry[part]
+            bad = [o for o in ev.get("outcome", []) if o not in act.all_outcomes]
+            if bad:
+                raise ConfigError(f"retry of {s.id}: {part}.outcome {bad}: action {act.name!r} never ends so "
+                                  f"(it declares {', '.join(sorted(act.all_outcomes))})")
+            if "aborted" in ev.get("outcome", []) and part == "if":
+                raise ConfigError(f"retry of {s.id}: an aborted step is never retried (the operator stopped it)")
+            for var, val in (ev.get("state") or {}).items():
+                vals = val if isinstance(val, list) else [val]
+                if var not in self.rc.states or any(v not in self.rc.states[var]["values"] for v in vals):
+                    raise ConfigError(f"retry of {s.id}: {part}.state {var}={val!r} is not a declared state value")
+            probe = ev.get("probe")
+            if probe is not None:
+                if probe not in self.reg.actions:
+                    raise ConfigError(f"retry of {s.id}: {part}.probe {probe!r} is not an action")
+                if not self.reg.actions[probe].readonly:
+                    raise ConfigError(f"retry of {s.id}: {part}.probe {probe!r} must be a read-only action "
+                                      f"(evidence is gathered, not made)")
 
 
 # ── walking ──────────────────────────────────────────────────────────────────
