@@ -14,12 +14,20 @@ Step entry forms (in paths, plan paths, detours and reactions):
   {stages: [up, ping], with: {...}}    a group sharing `with` (run-config list form)
   [a, b]                    a nested list, spliced in place
 
+Walk edits (the run config's `edit:` list, accumulated through `extends:`), applied in order
+to the compiled main path, each anchored on a step id:
+  {repeat: ping, after: join, id: ping-after-join}   the step again: same action/with/when
+  {insert: [steps...], after|before: <id>}           new steps
+  {skip: <id> | [<id>...]}                           dropped from the walk
+  {replace: <id>, by: [steps...]}                    one step out, these in, at its place
+
 On the command line, `all` (alone) means the run config's plan, exactly as a bare run; when
 the plan is empty it means the runner config's `all.fallback` path. `all` is never a step
 inside a plan or path: there it would mean the plan itself.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -32,6 +40,7 @@ log = logging.getLogger(__name__)
 
 MAIN = "main"
 REACTION_WORDS = ("continue", "stop")
+EDIT_OPS = {"repeat": {"after", "before", "id"}, "insert": {"after", "before"}, "skip": set(), "replace": {"by"}}
 ALL = "all"
 
 
@@ -90,6 +99,9 @@ class Program:
 class _Ids:
     def __init__(self) -> None:
         self.used: set[str] = set()
+
+    def release(self, sid: str) -> None:
+        self.used.discard(sid)
 
     def take(self, base: str, explicit: bool) -> str:
         if explicit:
@@ -193,8 +205,10 @@ class Compiler:
         return full[ia:ib + 1]
 
     def compile(self, plan: Any, cli_steps: list[str] | None = None,
-                cli_with: dict | None = None, plan_of: str = "the run config") -> Program:
-        """`plan_of` names where the plan comes from (RunConfig.plan_of), for Program.source."""
+                cli_with: dict | None = None, plan_of: str = "the run config",
+                edits: list | None = None) -> Program:
+        """`plan_of` names where the plan comes from (RunConfig.plan_of), for Program.source;
+        `edits` is the run config's `edit:` list."""
         notes: list[str] = []
         if plan is None:
             plan = {}
@@ -257,6 +271,9 @@ class Compiler:
             main[pos:pos] = new
             log.info("%s: %s spliced %s %s", where, [s.id for s in new], "after" if "after" in d else "before",
                      anchor)
+        done = self._apply_edits(edits, main, make, ids, adhoc, notes)
+        if done:
+            source += f"; edits: {', '.join(done)}"
         segments = {MAIN: main}
         reactions: dict[str, dict[str, Reaction]] = {}
         for sid, by_outcome in (plan.get("on") or {}).items():
@@ -295,6 +312,77 @@ class Compiler:
         for n in notes:
             log.info("  note: %s", n)
         return prog
+
+    def _apply_edits(self, edits: Any, main: list[Step], make, ids: _Ids, adhoc: bool,
+                     notes: list[str]) -> list[str]:
+        """Apply the walk edits to `main` in place; return what was done, for the banner."""
+        if edits is None:
+            return []
+        if not isinstance(edits, list):
+            raise ConfigError("edit: want a list of edits (repeat/insert/skip/replace)")
+        done: list[str] = []
+        for i, ed in enumerate(edits):
+            where = f"edit[{i}]"
+            if not isinstance(ed, dict):
+                raise ConfigError(f"{where}: want a mapping with one of {', '.join(EDIT_OPS)}")
+            ops = [k for k in ed if k in EDIT_OPS]
+            if len(ops) != 1:
+                raise ConfigError(f"{where}: want exactly one of {', '.join(EDIT_OPS)}, got {', '.join(map(str, ed))}")
+            op = ops[0]
+            extra = set(ed) - {op} - EDIT_OPS[op]
+            if extra:
+                raise ConfigError(f"{where}: {op} takes {', '.join(sorted(EDIT_OPS[op])) or 'no other key'}, "
+                                  f"not {', '.join(sorted(map(str, extra)))}")
+            if op in ("repeat", "insert") and len({"after", "before"} & set(ed)) != 1:
+                raise ConfigError(f"{where}: {op} needs exactly one of after: or before: <step id>")
+            if op == "replace" and "by" not in ed:
+                raise ConfigError(f"{where}: replace needs by: [steps...]")
+
+            def at(sid: Any, what: str) -> int | None:
+                idx = next((n for n, s in enumerate(main) if s.id == sid), None)
+                if idx is None:
+                    if not adhoc:
+                        raise ConfigError(f"{where}: {op}: {what} {sid!r} is not a step on the walk "
+                                          f"(on it: {', '.join(s.id for s in main) or 'nothing'})")
+                    notes.append(f"{where} ({op} {what} {sid!r}) dropped: not in this run")
+                return idx
+
+            if op in ("repeat", "insert"):
+                anchor = ed.get("after") or ed.get("before")
+                if op == "repeat":
+                    src = at(ed["repeat"], "step")
+                    if src is None or at(anchor, "anchor") is None:
+                        continue
+                    s = main[src]
+                    new = [Step(ids.take(ed.get("id") or s.id.split("#")[0], explicit=bool(ed.get("id"))), s.action,
+                                copy.deepcopy(s.with_), copy.deepcopy(s.when), s.max_visits)]
+                else:
+                    if at(anchor, "anchor") is None:
+                        continue
+                    new = make(self.expand(ed["insert"], where=where))
+                idx = at(anchor, "anchor")       # where it is NOW (after any earlier edit)
+                pos = idx + 1 if "after" in ed else idx
+                main[pos:pos] = new
+                rel = "after" if "after" in ed else "before"
+                done += [f"+{n.id}" + (f" (again {ed['repeat']})" if op == "repeat" else "") + f" {rel} {anchor}"
+                         for n in new]
+            elif op == "skip":
+                for sid in ed["skip"] if isinstance(ed["skip"], list) else [ed["skip"]]:
+                    idx = at(sid, "step")
+                    if idx is not None:
+                        del main[idx]
+                        done.append(f"-{sid}")
+            else:
+                idx = at(ed["replace"], "step")
+                if idx is None:
+                    continue
+                old = main.pop(idx)
+                ids.release(old.id)          # the replacement may take the old id
+                new = make(self.expand(ed["by"], where=where))
+                main[idx:idx] = new
+                done.append(f"{old.id} -> {', '.join(n.id for n in new)}")
+            log.info("%s: %s -> walk %s", where, op, [s.id for s in main])
+        return done
 
     def _check_references(self, prog: Program, adhoc: bool) -> None:
         all_ids = {s.id for s in prog.steps()}

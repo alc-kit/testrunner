@@ -118,6 +118,27 @@ By default the walk is linear: a step that ends as expected continues, anything 
 stops the run and leaves the system as it is. Steps can also carry `when:` (a condition
 on the config) and `max_visits:` (a bound for `goto` loops).
 
+**Editing a walk.** A run config's `edit:` list changes the walk its plan compiles to, without
+restating the plan: in order, each edit anchored on a step id. Edits **accumulate through
+`extends:`** (the parent's first), so a child config adds a test to the walk it inherits:
+```yaml
+extends: qdevice
+edit:
+  - repeat: ping                 # the same step again (same action, with, when), new id
+    after: join                  #   after: or before: a step id
+    id: ping-after-join          #   optional; default ping#2
+  - insert: [{action: membership, id: members-after-qdevice}]
+    after: qdevice
+  - skip: [cache-verify]         # one id or a list
+  - replace: images              # one step out, these in, at its place
+    by: [{action: images, with: {source: mirror}}]
+```
+A later edit may anchor on an id an earlier one made, and `on:`/`expect:` may name it. In a
+config every name must be on the walk (an error otherwise); with steps given on the command line
+an edit whose anchor is not in the run is dropped with a note. The edits are part of the step
+source in `--plan`, the banner, the journal and the report:
+`steps: plan of qdevice.yml (via x.yml); edits: +ping-after-join (again ping) after join, -cache-verify`.
+
 **`all` vs the plan.** On the command line, `all` means the run config's plan: it compiles
 exactly like a bare `testrunner`, `with`/`detours`/`on`/`expect` included. When the plan is
 empty, `all` runs the runner config's `all.fallback` path instead (with the plan's other keys,
