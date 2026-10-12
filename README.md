@@ -154,12 +154,13 @@ prints the whole of it as a table, which also goes in the journal and both repor
     report.
 
 ```
-$ testrunner --plan --matrix
-  step | requires (state in)    | outcome (event) | state after    | next
-  -----+------------------------+-----------------+----------------+-------------------------------------
-  join | rig: installed|clustered | passed*       | rig: clustered | outcome passed rig=clustered -> continue; outcome passed rig=installed -> goto form; otherwise -> stop (failed)
-       |                        | failed          | (unchanged)    | outcome failed -> run membership, then go on; otherwise -> stop (failed)
-       |                        | aborted         | (unchanged)    | stop (aborted)
+$ testrunner --plan --matrix          # the join step of the example above
+  step    | requires (state in)      | outcome (event) | state after    | next
+  --------+--------------------------+-----------------+----------------+------------------------------------
+  join    | rig: installed|clustered | passed*         | rig: clustered | outcome passed rig=clustered -> continue; outcome passed rig=installed -> goto form; otherwise -> stop (failed)
+          |                          | failed          | (unchanged)    | outcome failed -> run membership, then go on
+          |                          | errored         | (unchanged)    | otherwise -> stop (failed)
+          |                          | aborted         | (unchanged)    | stop (aborted)
 ```
 
 **Editing a walk.** A run config's `edit:` list changes the walk its plan compiles to, without
