@@ -109,8 +109,12 @@ class Proc:
                  echo: TextIO | None = None, env: dict[str, str] | None = None,
                  prompt_idle: float = DEFAULT_PROMPT_IDLE, color: bool = True, force_color: bool = False,
                  prompt_pattern: str = DEFAULT_PROMPT_PATTERN, secrets: Secrets | None = None,
-                 nolog: bool = False, show_command: Callable[[str], None] | None = None):
+                 nolog: bool = False, show_command: Callable[[str], None] | None = None,
+                 forwarded: tuple[str, ...] = ()):
         self.cwd, self.log_dir, self.ui, self.echo = Path(cwd), Path(log_dir), ui, echo
+        # the run's arguments after `--`, for the tool a step drives (ext.ansible: every
+        # playbook); Proc itself never adds them to anything
+        self.forwarded = tuple(forwarded)
         self.env = env or {}
         self.color = color
         self.force_color = force_color

@@ -371,14 +371,42 @@ testrunner --list | --status | --scenario | --select -c NAME | --release | --rep
   -c/--config NAME   -w/--with key=value   --color MODE   --non-interactive   --root DIR
   -v | -vv | --log-level LEVEL     testrunner's own log on stderr (the trace file is always written)
   --show-commands                  every command before it runs, as a copy-pasteable shell line
+testrunner [steps] -- ARGS...    everything after the first `--` is for the steps' tool
 ```
 Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).
+
+### Arguments for the steps: `--`
+
+```
+testrunner up..verify -- -vvv --limit node-1 -e debug=true
+```
+testrunner does not read anything after the first `--`. It hands those arguments to the steps.
+An action gets them as `proc.forwarded` (or `run.forwarded`), and a shell action's command gets
+them as `$TR_FORWARDED` (JSON). The banner, `--plan`, the journal and the report show them, so a
+report of a narrowed run says that it was narrowed. `--status`, `--list` and the other modes
+that run no step refuse them.
+
+`ext.ansible` gives them to every playbook a step runs. They come last, so a forwarded `-e` beats
+the step's own. Ad-hoc calls and inventory probes never get them. A forwarded `--limit`
+**narrows** the step's own limit and never replaces it:
+- ansible keeps only the last `--limit` it is given, so appending one would undo a step's own
+  targeting (a victim, the live nodes).
+- ansible itself works out the intersection (`ansible <step limit> --list-hosts --limit <yours>`).
+  If no hosts are left, the step refuses (`errored`).
+- A playbook that a step runs without a limit (one that targets its own `hosts:`, such as a key
+  server or the founder) runs un-narrowed.
+
+These are refused, because they make ansible exit 0 having done nothing or change what is
+tested: `-C/--check`, `--syntax-check`, `--list-hosts`, `--list-tasks`, `--list-tags` and
+`-i/--inventory`. The refusal happens when the step builds its controller, before the step does
+anything. Prefixes (`--lim`) and bundles (`-vl node-1`) are read the way ansible reads them.
 
 ## Extensions
 
 `testrunner.ext` holds the tooling a subscriber builds its actions on. A subscriber imports
 what it needs:
-- `ext.ansible`: playbooks and inventory queries, refusing an empty scope.
+- `ext.ansible`: playbooks and inventory queries, refusing an empty scope; it takes the
+  run's arguments after `--` (above).
 - `ext.vagrant`: `vagrant status` and `up`, and what exists.
 - `ext.console`: serial console capture.
 - `ext.rig`: a whole vagrant + ansible test rig.

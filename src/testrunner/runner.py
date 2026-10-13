@@ -102,6 +102,7 @@ class RunContext(Background):
         super().__init__("run")
         self.rc, self.run_config, self.program, self.store = rc, run_config, program, store
         self.root = rc.root
+        self.forwarded: tuple[str, ...] = ()     # the arguments after `--`
         self.secrets = Secrets(values_at(run_config.data, run_config.nolog_paths))
         self.state: dict[str, Any] = {}
         self.results: list[StepResult] = []
@@ -138,7 +139,8 @@ class Runner:
     def __init__(self, rc: RunnerConfig, reg: Registry, run_config: RunConfig, store: Store,
                  ui: InputBroker | None = None, echo: TextIO | None = None, color: str = "auto",
                  run_id: str = "", readonly: bool = False, report_formats: tuple[str, ...] = (),
-                 show_commands: bool = False):
+                 show_commands: bool = False, forwarded: tuple[str, ...] = ()):
+        self.forwarded = tuple(forwarded)          # the arguments after `--`, for the steps' tools
         self.show_commands = show_commands         # --show-commands: each command, copy-pasteable
         self.report_formats = report_formats      # empty: no report (only --report asks for one)
         self.run_id = run_id or uuid.uuid4().hex[:8]
@@ -232,6 +234,7 @@ class Runner:
         data = deep_merge(self.run_config.data, {rc.params_section: program.params})
         run = RunContext(rc, self.run_config, program, self.store)
         run.secrets = self.secrets
+        run.forwarded = self.forwarded
         run_scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui,
                                   "registry": self.reg})
         self.ui.attach()
@@ -253,7 +256,7 @@ class Runner:
         self.journal("run_start", config=str(self.run_config.file or ""), source=program.source,
                      matrix=matrix(program, self.reg),
                                   steps=[s.id for s in program.main], state=state, pid=os.getpid(),
-                     readonly=self.readonly)
+                     readonly=self.readonly, **({"forwarded": list(self.forwarded)} if self.forwarded else {}))
         try:
             # an observer that cannot look is a warning here (as in the CLI's pre-plan look),
             # never a crash: the run then starts from the stored state for that variable
@@ -497,10 +500,11 @@ class Runner:
                         env={"TR_STEP": step.id, "TR_ACTION": act.name, "TR_RUN_ID": self.run_id,
                              "TR_STATE_DIR": str(self.store.root), "TR_PARAMS": json.dumps(params),
                              "TR_CONFIG_FILE": str(self.run_config.file or ""),
-                             "TR_WITH": json.dumps(deep_merge(run.program.params, step.with_))},
+                             "TR_WITH": json.dumps(deep_merge(run.program.params, step.with_)),
+                             "TR_FORWARDED": json.dumps(list(self.forwarded))},
                         prompt_idle=float(rc.input.get("prompt_idle", 20)), color=self.color, force_color=self.force_color,
                         prompt_pattern=rc.input.get("prompt_pattern", DEFAULT_PROMPT_PATTERN),
-                        secrets=self.secrets, nolog=act.nolog,
+                        secrets=self.secrets, nolog=act.nolog, forwarded=self.forwarded,
                         show_command=(lambda line: self.say(self.style.dim(line))) if self.show_commands else None)
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
