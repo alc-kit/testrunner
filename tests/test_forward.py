@@ -106,6 +106,14 @@ def test_narrowed_to_nothing_refuses_and_runs_no_playbook(tmp_path, calls):
     assert "ansible-playbook" not in calls.read_text()
 
 
+def test_an_empty_host_list_with_exit_0_refuses_too(tmp_path, calls, monkeypatch):
+    monkeypatch.setenv("STUB_HOSTS", " ")          # answers "hosts (0):" and exits 0
+    with pytest.raises(EmptyScope) as e:
+        asyncio.run(ans(tmp_path, ["--limit", "n3"]).playbook("site.yml", limit=["n1"]))
+    assert "narrowed by the forwarded --limit n3" in e.value.outcome.detail     # says WHY it is empty
+    assert "ansible-playbook" not in calls.read_text()
+
+
 def test_a_playbook_without_a_limit_is_not_narrowed(tmp_path, calls):
     # its own hosts: (a tang, the founder): an operator's node limit would skip the play, exit 0
     asyncio.run(ans(tmp_path, ["--limit", "n2", "-v"]).playbook("tang.yml"))
