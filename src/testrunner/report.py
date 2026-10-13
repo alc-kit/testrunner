@@ -20,6 +20,7 @@ import html
 import json
 import re
 import os
+import shlex
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -54,6 +55,7 @@ class RunRecord:
     config: str = ""
     matrix: list = field(default_factory=list)   # the state/event matrix the run started with
     source: str = ""            # where the steps came from ("plan of x.yml", "all = path full: no plan in x.yml")
+    forwarded: list = field(default_factory=list)  # the arguments after `--` (a narrowed run says so)
     end: datetime | None = None
     passed: bool | None = None
     why: str = ""
@@ -88,7 +90,7 @@ def runs_from_journal(store: Store) -> list[RunRecord]:
             rid = e.get("run") or f"run{n}"
             current = rid
             runs[rid] = RunRecord(rid, _t(e), config=e.get("config", ""), source=e.get("source", ""),
-                                  matrix=e.get("matrix") or [])
+                                  matrix=e.get("matrix") or [], forwarded=e.get("forwarded") or [])
             order.append(rid)
             continue
         run = runs.get(rid)
@@ -305,7 +307,7 @@ th {{ color:var(--ink2); font-weight:600; }} td.num {{ text-align:right; font-va
 #tip b {{ font-weight:600; }}
 </style></head><body><main>
 <h1>{esc(title)}</h1>
-<div class="sub">{esc(name)}{(" · steps: " + esc(run.source)) if run.source else ""} · started {run.start:%Y-%m-%d %H:%M:%S} UTC{(" · " + esc(run.why)) if run.why else ""}</div>
+<div class="sub">{esc(name)}{(" · steps: " + esc(run.source)) if run.source else ""}{(" · forwarded: " + esc(shlex.join(run.forwarded))) if run.forwarded else ""} · started {run.start:%Y-%m-%d %H:%M:%S} UTC{(" · " + esc(run.why)) if run.why else ""}</div>
 <div class="tiles">
   <div class="tile"><div class="k">result</div><div class="v"><span class="pill s-{vstat}">{ICON[vstat]}</span> {verdict}</div></div>
   <div class="tile"><div class="k">wall time</div><div class="v">{_dur(total)}</div></div>
@@ -391,6 +393,8 @@ def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Sto
              ("wall time", _dur(run.seconds)), ("steps passed", f"{n_pass} / {len(run.steps)}")]
     if run.source:
         facts.insert(1, ("steps", _md(run.source)))
+    if run.forwarded:
+        facts.insert(2, ("forwarded to the steps", f"`{shlex.join(run.forwarded)}`"))
     if prev is not None and prev.seconds > 0 and run.passed is not None:
         d = (run.seconds - prev.seconds) / prev.seconds
         facts.append(("vs previous run of these steps", f"{d * 100:+.0f}% (`{prev.id}`: {_dur(prev.seconds)})"))

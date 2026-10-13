@@ -10,6 +10,10 @@
   testrunner --release            end the scenario (refused while a run changes state)
   testrunner --report [steps]     run, then write a test report (markdown; --report-format)
   testrunner --report-of RUN      (re)build the report of an earlier run from the journal
+  testrunner up..verify -- -vvv --limit n1 -e x=1
+                                  everything after `--` goes to the steps' tool, untouched by
+                                  testrunner (ext.ansible: every playbook; a --limit narrows
+                                  each step's own, it never replaces it)
   --config NAME|FILE   --with key=value   --color auto|always|never   --root DIR
   -v | -vv | --log-level LEVEL   show testrunner's own log (decisions) on stderr
   --show-commands      print every command before it runs, as a line you can paste into a
@@ -163,8 +167,18 @@ def terminal_level(args: argparse.Namespace) -> int | None:
     return level_of(os.environ.get(ENV_LEVEL))
 
 
+def split_forwarded(argv: list[str]) -> tuple[list[str], list[str]]:
+    """testrunner's own arguments, and those after the FIRST `--` (for the steps' tool)."""
+    if "--" not in argv:
+        return argv, []
+    i = argv.index("--")
+    return argv[:i], argv[i + 1:]
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    own, forwarded = split_forwarded(list(sys.argv[1:] if argv is None else argv))
+    args = parser().parse_args(own)
+    args.forwarded = forwarded
     style = Style(color_enabled(args.color, sys.stdout))
     try:
         level = terminal_level(args)
@@ -202,6 +216,14 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
                   {k: v["values"] for k, v in rc.states.items()}, list(rc.paths), rc.default_path,
                   rc.configs_dir, rc.config_env, rc.config_link, rc.default_config)
         store = Store(rc.state_dir)
+        if args.forwarded:
+            log.info("forwarded to the steps (after --): %s", shlex.join(args.forwarded))
+            looks = [f for f, on in (("--status", args.status), ("--scenario", args.scenario), ("--list", args.list),
+                                     ("--select", args.select), ("--release", args.release),
+                                     ("--report-of", args.report_of is not None)) if on]
+            if looks:
+                raise ConfigError(f"arguments after `--` are for the steps, and {looks[0]} runs none: "
+                                  f"{shlex.join(args.forwarded)}")
         if not (args.status or args.scenario or args.list or args.report_of is not None):
             # everything that runs, plans, selects or releases leaves a trace
             trace = logs.open_file(store.root / "logs", run_id)
@@ -287,7 +309,7 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
     try:
         runner = Runner(rc, reg, run_config, store, ui, color=args.color, run_id=run_id,
                         readonly=readonly, report_formats=formats if args.report else (),
-                        show_commands=args.show_commands)
+                        show_commands=args.show_commands, forwarded=tuple(args.forwarded))
     except FixtureError as e:
         log.error("refused before anything ran: %s", e)
         print(style.bad(f"ERROR: {e}"), file=sys.stderr)
@@ -321,6 +343,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
     if args.plan:
         print(style.banner(f"steps: {prog.source}"))
         print(f"run config {src}: {len(v.walk)} step(s) on the expected walk")
+        if args.forwarded:
+            print(f"forwarded to the steps: {runner.secrets.text(shlex.join(args.forwarded))}")
         for i, sid in enumerate(v.walk, 1):
             print(f"  {i:>3}  {sid}")
         for sid, by in prog.reactions.items():
@@ -341,6 +365,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
         return EXIT_USAGE
     print(style.banner(f"steps: {prog.source}"))
     print(f"run config {src}: {' > '.join(v.walk)}")
+    if args.forwarded:
+        print(f"forwarded to the steps: {runner.secrets.text(shlex.join(args.forwarded))}")
     if args.matrix:
         print("\n".join(matrix_text(matrix(prog, reg))))
     if logs.file:
