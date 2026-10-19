@@ -116,7 +116,15 @@ async def require_nodes(spec, rig, vg, params, step):
     await rig.require_nodes(vg, stage, *nodes, subset=rig.e("NODES", params))
 
 
-@step_kind("machines", keys=("names", "provider", "parallel", "log"))
+def machines_describe(spec, rig, proc, params):
+    """--dry-run: what machines_step would ask the rig's provider to do."""
+    provider = rig.machines(proc, params)
+    names = spec.get("names")
+    return [f"{spec['machines']} {names if names else '<no machines named: refused>'} through "
+            f"{type(provider).__name__}" + (f" (parallel {spec['parallel']})" if "parallel" in spec else "")]
+
+
+@step_kind("machines", keys=("names", "provider", "parallel", "log"), describe=machines_describe)
 async def machines_step(spec, rig, proc, params):
     """`{machines: up|destroy, names: [...]}` through Rig.machines() — vagrant by default, the
     rig's own provider otherwise. `up` refuses no names (vagrant would create every machine);

@@ -133,10 +133,11 @@ class Logs:
         self.root.addHandler(h)
         self.handlers.append(h)
 
-    def open_file(self, log_dir: Path, run_id: str) -> Path:
-        """Start the trace file; what was logged before it is written first."""
+    def open_file(self, log_dir: Path, run_id: str, dry: bool = False) -> Path:
+        """Start the trace file; what was logged before it is written first. A --dry-run's trace
+        is testrunner-dry-<id>.log and never becomes testrunner-last.log (it is not a run)."""
         log_dir.mkdir(parents=True, exist_ok=True)
-        path = log_dir / f"testrunner-{run_id}.log"
+        path = log_dir / f"testrunner-{'dry-' if dry else ''}{run_id}.log"
         fh = logging.FileHandler(path, encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(_Format(self, stamp=True))
@@ -150,6 +151,9 @@ class Logs:
         self.root.addHandler(fh)
         self.handlers.append(fh)
         self.file = path
+        if dry:
+            self._prune(log_dir)
+            return path
         last = log_dir / "testrunner-last.log"
         try:
             if last.is_symlink() or last.exists():

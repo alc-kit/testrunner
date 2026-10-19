@@ -55,6 +55,7 @@ class ActionMark:
     doc: str = ""
     readonly: bool = False
     nolog: bool = False
+    dry: Callable | None = None          # --dry-run: describes what the action would do
 
 
 @dataclass
@@ -78,6 +79,7 @@ class StepKindMark:
     name: str
     keys: tuple[str, ...] = ()
     readonly: bool = False
+    describe: Callable | None = None     # --dry-run: the command(s) a step would run, as lines
 
 
 @dataclass
@@ -89,7 +91,8 @@ def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None
            produces: Mapping[str, Any] | None = None,
            produces_on: Mapping[str, Mapping[str, Any]] | None = None,
            outcomes: Iterable[str] = (), tags: Iterable[str] = (),
-           readonly: bool = False, nolog: bool = False, doc: str | None = None) -> Callable:
+           readonly: bool = False, nolog: bool = False, doc: str | None = None,
+           dry: Callable | None = None) -> Callable:
     """Export a function as an action.
 
     requires     state the action must start from: {var: value} or {var: [values]}
@@ -101,13 +104,17 @@ def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None
                  run beside a state-changing run in the same directory
     nolog        NOLOG: the output of the commands it runs is neither logged nor shown
     doc          the one-line description `--list` shows (default: the docstring's first line)
+    dry          --dry-run: a function (fixtures by name, like the action) that DESCRIBES what the
+                 action would do instead of doing it — returns lines (a list of str), an Outcome or
+                 None. Without it a dry run does not run the action: it is marked "not run" and
+                 assumed to end with its expected outcome
     """
     def mark(fn: Callable) -> Callable:
         setattr(fn, MARK, ActionMark(
             name=name or fn.__name__.replace("_", "-"),
             requires=dict(requires or {}), produces=dict(produces or {}),
             produces_on={k: dict(v) for k, v in (produces_on or {}).items()},
-            outcomes=tuple(outcomes), tags=tuple(tags), readonly=readonly, nolog=nolog,
+            outcomes=tuple(outcomes), tags=tuple(tags), readonly=readonly, nolog=nolog, dry=dry,
             doc=doc if doc is not None else
             ((fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else "")))
         return fn
@@ -148,7 +155,8 @@ def hook(name: str) -> Callable:
     return mark
 
 
-def step_kind(name: str, *, keys: Iterable[str] = (), readonly: bool = False) -> Callable:
+def step_kind(name: str, *, keys: Iterable[str] = (), readonly: bool = False,
+              describe: Callable | None = None) -> Callable:
     """Export an inner-step kind for walk actions (`{<name>: value, <keys>...}` in a walk).
 
     The function receives the step's RENDERED spec as `spec` (the kind's own value under
@@ -156,10 +164,12 @@ def step_kind(name: str, *, keys: Iterable[str] = (), readonly: bool = False) ->
     step's `outcomes:` evidence, then passed on exit 0), an Outcome, or None (passed).
     keys      the other keys the kind takes besides its own name (checked when walks load)
     readonly  its steps only LOOK (a guard): read-only unless a step says otherwise, so reality
-              is not re-read after them and a run of them takes no writer lock
+              is not re-read after them and a run of them takes no writer lock; --dry-run RUNS them
+    describe  --dry-run: a function (spec + fixtures by name, like the kind) that returns the
+              command(s) the step would run, as lines, WITHOUT running anything
     """
     def mark(fn: Callable) -> Callable:
-        setattr(fn, MARK, StepKindMark(name=name, keys=tuple(keys), readonly=readonly))
+        setattr(fn, MARK, StepKindMark(name=name, keys=tuple(keys), readonly=readonly, describe=describe))
         return fn
     return mark
 
