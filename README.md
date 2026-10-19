@@ -242,6 +242,85 @@ which reads only the store), and the plan is simulated from there over every rea
 `requires` must hold, every reaction must name an outcome its action can end with, every
 `expect.state` must be reachable. An impossible plan is refused before the first step.
 
+## Walk actions
+
+An action can also be a **walk**: a list of inner steps, written in YAML, that the planner
+compiles exactly like a plan. Every inner step gets what a plan step has — a guard
+(`requires`), an effect (`produces`/`produces_on`), an expected outcome (`expect`), a
+transition (`on:`), `retry`, `when`, `max_visits` — so a step that failed can be retried,
+ignored or made to fail the walk, decided by the outcome and the state the runner actually
+reached. Use a walk for COMPOSITION (run this playbook, then that one, on these hosts); keep
+Python for questions and procedures that need logic (a probe that answers `member` /
+`not-member`, a sweep of leftover machines).
+
+```yaml
+# testrunner.yml: action_files: [actions/*.yml]      (or walks in its own `actions:`)
+actions:
+  install:
+    doc: install the product on the nodes
+    requires: {rig: [up, installed]}
+    produces: {rig: {up: installed}}
+    params: {limit: "{live}", log: install.log}       # defaults; a caller's `with:` wins
+    steps:
+      - id: install
+        playbook: playbooks/install.yml               # a kind ext.ansible registers
+        limit: "{param.limit}"
+        extra: {encrypt: "true"}
+        rules: {file: drive/install.json, CLUSTER: "{inventory:{rig:founder}/cluster_name}"}
+        log: "{param.log}"
+
+  reprovision:
+    extends: install                                  # its steps, merged by id
+    params: {victim: "{role:reprovision_victim}"}
+    steps:
+      - {id: install, limit: ["{param.victim}"], extra: {force: "true"}, log: reprovision.log}
+      - {id: unlock, action: reboot, with: {limit: ["{param.victim}"]}}
+
+  foreign-tang:
+    outcomes: [refused]
+    steps:
+      - {id: arrange, run: ["scripts/bind-foreign.sh"]}
+      - id: provoke
+        playbook: playbooks/encrypt.yml
+        outcomes:                                     # classify what the command did
+          refused: {exit: nonzero, output: ["does not declare", "{param.url}"]}
+        expect: refused                               # anything else fails the walk ...
+      - {id: restore, run: ["scripts/restore.sh"], always: true}   # ... after this ran
+      - {id: verify, action: verify, on: {failed: [collect-logs, fail]}}
+```
+
+**Inner steps** are exactly one of: `action:` (any action, with `with:`; its contract is that
+action's unless the step declares its own), `run:` (a command: argv or a string, `env`, `cwd`,
+`rules`, `timeout`, `log`), or a kind an extension registers — `playbook:` (`ext.ansible`),
+`vagrant: up|destroy` (`ext.vagrant`) — or your own `@step_kind`.
+
+**Outcomes from evidence.** A command step passes on exit 0 and fails otherwise, unless an
+`outcomes:` entry holds first: `exit` (a number, a list, `zero`, `nonzero`), `output` (a
+regular expression or a list of them, all must match; a `{reference}` in it matches
+literally), `timed_out`.
+
+**Reactions** (`on: {<outcome>: ...}`, or transition rules, as in a plan): `continue`,
+`fail` (the walk ends with that outcome), `ignore` (recorded, the walk goes on), `skip` (the
+walk ends skipped), `{end: <outcome>}` (one the walk declares in `outcomes:`), `{goto: <id>}`,
+or a step list, which may end in one of those words (`[collect-logs, fail]`). `always: true`
+runs a step whenever the walk leaves past it, however it ended (not after an operator abort,
+which leaves the system as it is). An `ignore` is safe by construction: the next step's
+`requires` still guards it, so ignoring a failure a later step depends on is refused before
+the run starts.
+
+**Templates** are `{name}` references in values, nothing more: `{param.x}`, `{env.X}`,
+`{run.root}`, `{run.id}`, `{step.id}`, `{state.var}`, and RESOLVERS — `ext.rig` registers
+`{live}`, `{role:<name>}`, `{roles:<name>}`, `{rig:<attribute>}`,
+`{inventory:<host>/<expression>}`, `{peer_of:<node>}`; register your own with `@resolver`. A
+value that IS one reference keeps its type (a list stays a list). An unknown name is refused
+when the walks load.
+
+**The contract is derived**: `requires` from the first inner step, `readonly` when every
+inner step is; the static check composes the walk's effect from its inner steps and checks
+inside it. Inner steps are named `<walk>/<step>` in the trace, the journal, the reports and
+`--plan --matrix`; an `edit:` (or `--skip`) may retry or skip one, and `--from` / `--resume`
+start inside a walk (`--resume` after `addnode/join` failed does not rebuild the node).
+
 ## The scenario lock
 
 The first state-changing run in a directory **selects the scenario**: its resolved run
@@ -411,7 +490,10 @@ what it needs:
 - `ext.console`: serial console capture.
 - `ext.rig`: a whole vagrant + ansible test rig.
 
-An extension's settings live in the runner config under `ext: {<name>: {...}}`.
+An extension's settings live in the runner config under `ext: {<name>: {...}}`. Enabling one
+there also loads the inner-step kinds and resolvers it registers for walk actions:
+`ext.ansible` -> `playbook:`, `ext.vagrant` -> `vagrant:`, `ext.rig` -> `{live}` `{role:x}`
+`{roles:x}` `{rig:x}` `{inventory:h/x}` `{peer_of:n}` (`ext: {ansible: {}, vagrant: {}}`).
 
 **`ext.rig`** is what every such rig is built from, whatever it tests:
 - the run config and the environment it becomes (`rig.config`, a schema engine: the rig's
@@ -450,7 +532,8 @@ A rig usually keeps a three-line `bin/` wrapper for each. The package docstring
 ```yaml
 modules: [actions/]            # python exports
 pythonpath: [lib/]             # directories those modules import from
-actions: {...}                 # shell exports
+actions: {...}                 # shell exports, and walk actions (an entry with steps:)
+action_files: [actions/*.yml]  # more walk actions, one `actions:` mapping per file
 state_dir: state               # the subscriber's state (journal, state, scenario, logs)
 states: {...}
 paths: {lifecycle: [install, start, seed, verify]}

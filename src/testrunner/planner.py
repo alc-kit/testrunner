@@ -29,6 +29,14 @@ apart) when ALL of `if` hold and NONE of `unless` match. Evidence keys: outcome 
 the attempt printed), state (the OBSERVED state after it), probe (a read-only action that must
 pass / that passes).
 
+WALK ACTIONS (walks.py) compile their inner steps with this same compiler in walk mode
+(`Compiler(rc, reg, walk=<name>)`): the steps are the walk's inner actions, and a reaction may
+also END the walk — `fail` (the action ends with the outcome that triggered it), `skip` (the
+action ends skipped), `{end: <outcome>}` (a named outcome the walk declares) — or `ignore` the
+outcome (recorded, the walk goes on; the next step's `requires` still guards it). A step list
+may end in one of those words: `[collect-logs, fail]` runs the steps, then fails. A step may
+carry `always: true`: it runs whenever the walk leaves past it, however it ends.
+
 On the command line, `all` (alone) means the run config's plan, exactly as a bare run; when
 the plan is empty it means the runner config's `all.fallback` path. `all` is never a step
 inside a plan or path: there it would mean the plan itself.
@@ -50,6 +58,7 @@ log = logging.getLogger(__name__)
 
 MAIN = "main"
 REACTION_WORDS = ("continue", "stop")
+WALK_WORDS = ("fail", "ignore", "skip")          # reactions only a walk action's steps may have
 EDIT_OPS = {"repeat": {"after", "before", "id"}, "insert": {"after", "before"}, "skip": set(), "replace": {"by"},
             "retry": {"times", "delay", "if", "unless"}, "transition": {"rules"}}
 RETRY_KEYS = {"times", "delay", "if", "unless"}
@@ -97,12 +106,13 @@ class Step:
     when: dict[str, Any] | None = None
     max_visits: int = 1
     retry: dict[str, Any] | None = None
+    always: bool = False            # walks: runs whenever the walk leaves past it
 
 
 @dataclass
 class Reaction:
-    kind: str                       # continue | stop | goto | steps
-    target: str | None = None       # goto
+    kind: str                       # continue | stop | goto | steps | fail | ignore | skip | end
+    target: str | None = None       # goto: the step; end: the outcome
     segment: str | None = None      # steps: the segment key
 
 
@@ -133,6 +143,12 @@ class Program:
     source: str = ""
     # transition RULES (on: <step>: [ {when, then} ... ]): first match wins, none -> stop, failed
     rules: dict[str, list[Rule]] = field(default_factory=dict)
+    # walks: a reaction segment that ends in a word ([collect-logs, fail]): segment key ->
+    # (that reaction, the outcome that started the segment, or None for a rule)
+    segment_then: dict[str, tuple[Reaction, str | None]] = field(default_factory=dict)
+    # THIS run's copies of walk programs, by the walk step's full id ("addnode", "a/b"): what
+    # `edit:` retry/skip of an inner step and --from/--resume inside a walk change (T-D9)
+    inner: dict[str, "Program"] = field(default_factory=dict)
 
     @property
     def main(self) -> list[Step]:
@@ -178,8 +194,9 @@ class _Ids:
 
 
 class Compiler:
-    def __init__(self, rc: RunnerConfig, reg: Registry):
+    def __init__(self, rc: RunnerConfig, reg: Registry, walk: str | None = None):
         self.rc, self.reg = rc, reg
+        self.walk = walk          # compiling the inner steps of this walk action (walk mode)
         if ALL in reg.actions:
             raise ConfigError("an action may not be named `all`: on the command line `all` means the "
                               "run config's plan")
@@ -206,18 +223,28 @@ class Compiler:
                     raise ConfigError(f"{where}: a stages group takes only stages/with, not {', '.join(sorted(unknown))}")
                 out += self.expand(e["stages"], deep_merge(w, e.get("with") or {}), depth + 1, where)
             elif isinstance(e, dict) and "action" in e:
-                unknown = set(e) - {"action", "id", "with", "when", "max_visits", "retry"}
+                allowed = {"action", "id", "with", "when", "max_visits", "retry"} | ({"always"} if self.walk else set())
+                unknown = set(e) - allowed
                 if unknown:
                     raise ConfigError(f"{where}: step {e['action']!r}: unknown key(s) {', '.join(sorted(unknown))}")
                 name = e["action"]
-                if name not in self.reg.actions:
-                    raise ConfigError(f"{where}: unknown action {name!r}")
+                self._known_action(name, where)
                 out.append({"action": name, "id": e.get("id"), "with": deep_merge(w, e.get("with") or {}),
                             "when": e.get("when"), "max_visits": int(e.get("max_visits", 1)),
-                            "retry": retry_spec(e["retry"], f"{where}: step {name!r}") if "retry" in e else None})
+                            "retry": retry_spec(e["retry"], f"{where}: step {name!r}") if "retry" in e else None,
+                            "always": bool(e.get("always", False))})
             else:
                 raise ConfigError(f"{where}: cannot read step {e!r}")
         return out
+
+    def _known_action(self, name: str, where: str) -> None:
+        act = self.reg.actions.get(name)
+        if act is None:
+            raise ConfigError(f"{where}: unknown action {name!r}")
+        owner = getattr(act, "inner_of", None)
+        if owner is not None and owner != self.walk:
+            raise ConfigError(f"{where}: {name!r} is an inner step of the walk action {owner!r}, not an action "
+                              f"a plan can name")
 
     def _all_inside(self, where: str) -> ConfigError:
         fb = self.rc.all_fallback
@@ -229,12 +256,16 @@ class Compiler:
             raise self._all_inside(where)
         if ".." in name:
             return self._expand_range(name, w, depth, where)
-        if name in self.rc.paths:
+        if name in self.rc.paths and not self.walk:
             out = self.expand(self.rc.paths[name], w, depth + 1, f"paths.{name}")
             log.debug("%s: path %r -> %s", where, name, [s["id"] or s["action"] for s in out])
             return out
         if name in self.reg.actions:
-            return [{"action": name, "id": None, "with": w, "when": None, "max_visits": 1, "retry": None}]
+            self._known_action(name, where)
+            return [{"action": name, "id": None, "with": w, "when": None, "max_visits": 1, "retry": None,
+                     "always": False}]
+        if self.walk:
+            raise ConfigError(f"{where}: {name!r} is not an action (a walk's steps are actions, never paths)")
         raise ConfigError(f"{where}: {name!r} is neither an action nor a path")
 
     def _expand_range(self, spec: str, w: dict, depth: int, where: str) -> list[dict]:
@@ -312,7 +343,8 @@ class Compiler:
             out = []
             for e in entries:
                 sid = ids.take(e["id"] or e["action"], explicit=bool(e["id"]))
-                out.append(Step(sid, e["action"], e["with"], e["when"], e["max_visits"], e["retry"]))
+                out.append(Step(sid, e["action"], e["with"], e["when"], e["max_visits"], e["retry"],
+                                e.get("always", False)))
             return out
 
         main = make(self.expand(path, where="plan.path"))
@@ -334,32 +366,63 @@ class Compiler:
             log.info("%s: %s spliced %s %s", where, [s.id for s in new], "after" if "after" in d else "before",
                      anchor)
         transitions: dict[str, tuple[str, Any]] = {}       # step id -> (where, rules), from `edit:`
-        done = self._apply_edits(edits, main, make, ids, adhoc, notes, transitions=transitions)
-        done += self._apply_edits(cli_edits, main, make, ids, True, notes, label="--edit", transitions=transitions)
+        inner: dict[str, Program] = {}
+        done = self._apply_edits(edits, main, make, ids, adhoc, notes, transitions=transitions, inner=inner)
+        done += self._apply_edits(cli_edits, main, make, ids, True, notes, label="--edit", transitions=transitions,
+                                  inner=inner)
         if done:
             source += f"; edits: {', '.join(done)}"
         if start_at is not None:
-            idx = next((n for n, s in enumerate(main) if s.id == start_at), None)
+            outer = start_at.split("/")[0]
+            idx = next((n for n, s in enumerate(main) if s.id == outer), None)
             if idx is None:
                 raise ConfigError(f"--from {start_at}: not a step on the walk "
                                   f"(on it: {', '.join(s.id for s in main) or 'nothing'})")
             if idx:
                 log.info("--from %s: the walk starts there; %s left out", start_at, [s.id for s in main[:idx]])
             del main[:idx]
+            if "/" in start_at:
+                self._start_inside(main, start_at, inner, notes)
             source += f"; from {start_at}"
         segments = {MAIN: main}
         reactions: dict[str, dict[str, Reaction]] = {}
         rules: dict[str, list[Rule]] = {}
+        segment_then: dict[str, tuple[Reaction, str | None]] = {}
 
-        def reaction_of(r: Any, where: str, key: str) -> Reaction:
+        def word_of(r: Any, where: str) -> Reaction | None:
+            """A reaction written as a word or {goto}/{end}; None when `r` is a step list."""
             if r in REACTION_WORDS:
+                if self.walk and r == "stop":
+                    raise ConfigError(f"{where}: inside a walk action a step ends the walk with fail, "
+                                      f"skip or {{end: <outcome>}}, not stop")
                 return Reaction(r)
+            if r in WALK_WORDS or (isinstance(r, dict) and set(r) == {"end"}):
+                if not self.walk:
+                    raise ConfigError(f"{where}: {r!r} is a reaction of a walk action's inner steps; "
+                                      f"a plan reacts with continue, stop, {{goto: <step>}} or a step list")
+                return Reaction("end", target=str(r["end"])) if isinstance(r, dict) else Reaction(r)
             if isinstance(r, dict) and set(r) == {"goto"}:
                 return Reaction("goto", target=r["goto"])
+            return None
+
+        def reaction_of(r: Any, where: str, key: str, outcome: str | None = None) -> Reaction:
+            word = word_of(r, where)
+            if word is not None:
+                return word
+            if isinstance(r, list) and r and self.walk:
+                last = word_of(r[-1], f"{where}[-1]") if (isinstance(r[-1], (str, dict))) else None
+                if last is not None and last.kind not in ("continue",):
+                    if len(r) == 1:
+                        return last
+                    segments[key] = make(self.expand(r[:-1], where=where))
+                    segment_then[key] = (last, outcome)
+                    return Reaction("steps", segment=key)
             if isinstance(r, (list, str)):
                 segments[key] = make(self.expand(r, where=where))
                 return Reaction("steps", segment=key)
-            raise ConfigError(f"{where}: want continue, stop, {{goto: <step>}} or a step list")
+            raise ConfigError(f"{where}: want " + ("continue, fail, ignore, skip, {end: <outcome>}, {goto: <step>}, "
+                                                   "or a step list (that may end in one of those words)"
+                                                   if self.walk else "continue, stop, {goto: <step>} or a step list"))
 
         def rules_of(sid: str, given: Any, where: str) -> list[Rule]:
             if not isinstance(given, list) or not given:
@@ -392,7 +455,8 @@ class Compiler:
             if not isinstance(by_outcome, dict):
                 raise ConfigError(f"{where}: want {{<outcome>: <reaction>}} or a list of transition rules")
             for outcome, r in by_outcome.items():
-                reactions.setdefault(sid, {})[outcome] = reaction_of(r, f"{where}.{outcome}", f"{sid}!{outcome}")
+                reactions.setdefault(sid, {})[outcome] = reaction_of(r, f"{where}.{outcome}", f"{sid}!{outcome}",
+                                                                     outcome)
         for sid, (where, given) in transitions.items():      # edits re-route a step: they replace
             reactions.pop(sid, None)
             rules[sid] = rules_of(sid, given, where)
@@ -401,7 +465,7 @@ class Compiler:
             if not isinstance(e, dict) or set(e) - {"outcome", "state"}:
                 raise ConfigError(f"plan.expect.{sid}: want {{outcome: ..., state: {{...}}}}")
             expect[sid] = Expect(e.get("outcome", PASSED), dict(e.get("state") or {}))
-        prog = Program(segments, reactions, expect, params, notes, source, rules)
+        prog = Program(segments, reactions, expect, params, notes, source, rules, segment_then, inner)
         self._check_references(prog, adhoc or start_at is not None)
         log.info("compiled: main %s", [f"{s.id}" + (f"(={s.action})" if s.action != s.id else "") for s in prog.main])
         for s in prog.steps():
@@ -417,9 +481,58 @@ class Compiler:
             log.info("  note: %s", n)
         return prog
 
+    def _inner_step(self, main: list[Step], sid: str, inner: dict, where: str) -> tuple["Program", str, str] | None:
+        """`walk/step[/step...]`: this run's copy of the program holding the last part (made, and
+        kept in `inner` by the walk step's full id), that part's local id, and the copy's key.
+        None when the first part is not on the walk."""
+        parts = sid.split("/")
+        step = next((s for s in main if s.id == parts[0]), None)
+        if step is None:
+            return None
+        key = parts[0]
+        for i in range(1, len(parts)):
+            w = walk_of(self.reg.actions[step.action], self.reg)
+            if w is None:
+                raise ConfigError(f"{where}: {key} is not a walk action, so {sid!r} names no inner step")
+            if key not in inner:
+                inner[key] = copy.deepcopy(w.program)
+                log.debug("%s: this run's own copy of walk %s's program (for %s)", where, w.name, key)
+            prog = inner[key]
+            nxt = next((s for s in prog.main if s.id == parts[i]), None)
+            if nxt is None:
+                raise ConfigError(f"{where}: walk {w.name} ({key}) has no step {parts[i]!r} "
+                                  f"(it has {', '.join(s.id for s in prog.main)})")
+            if i == len(parts) - 1:
+                return prog, parts[i], key
+            key, step = f"{key}/{parts[i]}", nxt
+        return None
+
+    def _recheck_inner(self, prog: "Program", key: str, notes: list[str]) -> None:
+        owner = next((a.inner_of for s in prog.main for a in [self.reg.actions[s.action]] if a.inner_of), None)
+        before = len(prog.notes)
+        Compiler(self.rc, self.reg, walk=owner)._check_references(prog, True)
+        notes += [f"{key}: {n}" for n in prog.notes[before:]]
+
+    def _start_inside(self, main: list[Step], start_at: str, inner: dict, notes: list[str]) -> None:
+        """--from/--resume at an inner step: every level of the walk starts there (T-D9)."""
+        parts = start_at.split("/")
+        for i in range(2, len(parts) + 1):
+            found = self._inner_step(main, "/".join(parts[:i]), inner, f"--from {start_at}")
+            if found is None:
+                return
+            prog, local, key = found
+            idx = next(n for n, s in enumerate(prog.main) if s.id == local)
+            if idx:
+                log.info("--from %s: walk %s starts at %s; %s left out", start_at, key, local,
+                         [s.id for s in prog.main[:idx]])
+            del prog.main[:idx]
+            self._recheck_inner(prog, key, notes)
+
     def _apply_edits(self, edits: Any, main: list[Step], make, ids: _Ids, adhoc: bool,
-                     notes: list[str], label: str = "edit", transitions: dict | None = None) -> list[str]:
-        """Apply the walk edits to `main` in place; return what was done, for the banner."""
+                     notes: list[str], label: str = "edit", transitions: dict | None = None,
+                     inner: dict | None = None) -> list[str]:
+        """Apply the walk edits to `main` in place; return what was done, for the banner. An
+        inner step (`addnode/install`) may be retried or skipped — nothing else (T-D9)."""
         if edits is None:
             return []
         if not isinstance(edits, list):
@@ -441,6 +554,35 @@ class Compiler:
                 raise ConfigError(f"{where}: {op} needs exactly one of after: or before: <step id>")
             if op == "replace" and "by" not in ed:
                 raise ConfigError(f"{where}: replace needs by: [steps...]")
+
+            targets = [ed[op]] if op != "skip" or not isinstance(ed[op], list) else ed[op]
+            if any(isinstance(t, str) and "/" in t for t in targets) or any(
+                    isinstance(ed.get(k), str) and "/" in ed[k] for k in ("after", "before")):
+                if op not in ("retry", "skip"):
+                    raise ConfigError(f"{where}: {op} cannot reach inside a walk action; an inner step "
+                                      f"(walk/step) can only be retried or skipped")
+                for t in targets:
+                    if "/" not in str(t):
+                        raise ConfigError(f"{where}: skip mixes inner and outer steps; give them separately")
+                    found = self._inner_step(main, str(t), inner if inner is not None else {}, where)
+                    if found is None:
+                        if not adhoc:
+                            raise ConfigError(f"{where}: {op}: {t!r}: {str(t).split('/')[0]!r} is not a step on "
+                                              f"the walk (on it: {', '.join(s.id for s in main) or 'nothing'})")
+                        notes.append(f"{where} ({op} {t!r}) dropped: not in this run")
+                        continue
+                    prog, local, key = found
+                    if op == "retry":
+                        st = next(s for s in prog.main if s.id == local)
+                        st.retry = retry_spec({k: v for k, v in ed.items() if k != "retry"}, where)
+                        Compiler(self.rc, self.reg)._check_retry(st)
+                        done.append(f"retry {t} x{st.retry['times']}")
+                    else:
+                        prog.main[:] = [s for s in prog.main if s.id != local]
+                        self._recheck_inner(prog, key, notes)
+                        done.append(f"-{t}")
+                    log.info("%s: %s %s inside walk step %s", where, op, local, key)
+                continue
 
             def at(sid: Any, what: str) -> int | None:
                 idx = next((n for n, s in enumerate(main) if s.id == sid), None)
@@ -626,10 +768,7 @@ def requires_holds(requires: dict, state: dict) -> tuple[bool, list[str]]:
     return True, unknown
 
 
-def produced(act: ActionSpec, outcome: str, state: dict) -> dict:
-    """The state values an outcome sets. A value is either the new value, or a TRANSITION
-    MAP {current: next}: a current value the map does not list stays as it is."""
-    spec = act.produces if outcome == PASSED else act.produces_on.get(outcome, {})
+def _effect(spec: dict, state: dict) -> dict:
     out = {}
     for var, val in spec.items():
         if isinstance(val, dict):
@@ -640,17 +779,62 @@ def produced(act: ActionSpec, outcome: str, state: dict) -> dict:
     return out
 
 
+def walk_of(act: ActionSpec, reg: Registry | None) -> Any:
+    """The WalkSpec an action runs: its own (a walk), or its target's (an inner step that
+    calls a walk); None otherwise."""
+    if act.kind == "walk":
+        return act.walk
+    if act.kind == "call" and reg is not None:
+        target = reg.actions.get(act.call or "")
+        return target.walk if target is not None and target.kind == "walk" else None
+    return None
+
+
+def produced(act: ActionSpec, outcome: str, state: dict, reg: Registry | None = None,
+             compose: bool = False) -> dict:
+    """The state values an outcome sets. A value is either the new value, or a TRANSITION
+    MAP {current: next}: a current value the map does not list stays as it is.
+
+    compose=True (the static check): a walk that PASSES has the effect of its inner steps'
+    expected walk, in order, then its own `produces`; an inner step that calls an action
+    without declaring effects of its own has that action's effect. At run time the inner
+    steps apply their own effects as they end, so the walk's step applies only its own."""
+    if compose and reg is not None:
+        if act.kind == "call" and not act.own_effects and act.call in reg.actions:
+            return produced(reg.actions[act.call], outcome, state, reg, True)
+        if act.kind == "walk" and outcome == PASSED:
+            s = dict(state)
+            prog = act.walk.program
+            for st in prog.main:
+                s.update(produced(reg.actions[st.action], prog.expected(st.id).outcome, s, reg, True))
+            s.update(_effect(act.produces, s))
+            return {k: v for k, v in s.items() if state.get(k) != v or k in act.produces}
+    return _effect(act.produces if outcome == PASSED else act.produces_on.get(outcome, {}), state)
+
+
 def reaction_text(prog: Program, r: Reaction) -> str:
     if r.kind == "goto":
         return f"goto {r.target}"
+    if r.kind == "end":
+        return f"end the walk {r.target}"
+    if r.kind == "fail":
+        return "fail the walk"
+    if r.kind == "skip":
+        return "end the walk skipped"
+    if r.kind == "ignore":
+        return "ignore it, go on"
     if r.kind == "steps":
-        return f"run {', '.join(s.id for s in prog.segments.get(r.segment or '', []))}, then go on"
+        then = prog.segment_then.get(r.segment or "")
+        return (f"run {', '.join(s.id for s in prog.segments.get(r.segment or '', []))}, then "
+                + (reaction_text(prog, then[0]) if then else "go on"))
     return r.kind
 
 
-def matrix(prog: Program, reg: Registry) -> list[dict[str, str]]:
+def matrix(prog: Program, reg: Registry, prefix: str = "", depth: int = 0,
+           inner_progs: dict | None = None) -> list[dict[str, str]]:
     """The state/event matrix of the main walk: per step and outcome (the event), the state it
-    needs, the state it leaves, and what comes next. `*` marks the expected outcome."""
+    needs, the state it leaves, and what comes next. `*` marks the expected outcome. A walk
+    action's inner steps follow its rows, indented, as `<step>/<inner step>`."""
     rows = []
     for s in prog.main:
         act = reg.actions[s.action]
@@ -673,8 +857,12 @@ def matrix(prog: Program, reg: Registry) -> list[dict[str, str]]:
                 nxt = reaction_text(prog, r) if r else ("continue" if o == exp else "stop (failed)")
             req = ", ".join(f"{k}: {'|'.join(map(str, v)) if isinstance(v, list) else v}"
                             for k, v in act.requires.items()) or "-"
-            rows.append({"step": s.id if n == 0 else "", "requires": req if n == 0 else "",
+            rows.append({"step": "  " * depth + prefix + s.id if n == 0 else "", "requires": req if n == 0 else "",
                          "outcome": o + ("*" if o == exp else ""), "after": after, "next": nxt})
+        inner = walk_of(act, reg)
+        if inner is not None and depth < 6:
+            ip = prog.inner if inner_progs is None else inner_progs
+            rows += matrix(ip.get(f"{prefix}{s.id}") or inner.program, reg, f"{prefix}{s.id}/", depth + 1, ip)
     return rows
 
 
@@ -692,9 +880,13 @@ def state_matches(want: dict, state: dict) -> bool:
 
 @dataclass
 class Transition:
-    cursor: Cursor | None           # None: the run ends
-    verdict: str                    # ok | diverted | failed — what this outcome means for the run
+    cursor: Cursor | None           # None: the run (or walk) ends
+    # ok | diverted | failed | ignored | ended — what this outcome means for the run. `ended`
+    # (walks only): the walk stops here and its action ends with `ends`; `failed` in a walk:
+    # the action ends with `ends` (the outcome that failed it) when that is set
+    verdict: str
     why: str = ""
+    ends: str | None = None
 
 
 class Walker:
@@ -708,14 +900,22 @@ class Walker:
         seg, i = cur[-1]
         return self.prog.segments[seg][i]
 
-    def _advance(self, cur: Cursor) -> Cursor | None:
+    def _go_on(self, cur: Cursor, verdict: str, why: str = "") -> Transition:
+        """The step after `cur`; leaving a reaction segment that ends in a word (walks:
+        [collect-logs, fail]) applies that word, as the step that started the segment."""
         frames = list(cur)
         while frames:
             seg, i = frames.pop()
             if i + 1 < len(self.prog.segments[seg]):
                 frames.append((seg, i + 1))
-                return tuple(frames)
-        return None
+                return Transition(tuple(frames), verdict, why)
+            then = self.prog.segment_then.get(seg)
+            if then is not None and frames:
+                parent = tuple(frames)
+                reaction, outcome = then
+                return self._react(parent, self.current(parent), reaction, outcome or "failed",
+                                   matched=False, because=f" (after {', '.join(s.id for s in self.prog.segments[seg])})")
+        return Transition(None, verdict, why)
 
     def next(self, cur: Cursor, outcome: str, state: dict | None = None) -> Transition:
         step = self.current(cur)
@@ -727,19 +927,30 @@ class Walker:
                 if (r.outcomes is None or outcome in r.outcomes) and state_matches(r.state, state or {}):
                     return self._react(cur, step, r.reaction, outcome, matched, f" (rule: {r.text})")
             return Transition(None, "failed", f"{step.id} ended {outcome} with state {state or {}}: "
-                                              f"no transition rule matches")
+                                              f"no transition rule matches", ends=outcome)
         r = self.prog.reactions.get(step.id, {}).get(outcome)
         if r is None:
             if matched:
-                return Transition(self._advance(cur), "ok")
-            return Transition(None, "failed", f"{step.id} ended {outcome}, expected {expected}")
+                return self._go_on(cur, "ok")
+            return Transition(None, "failed", f"{step.id} ended {outcome}, expected {expected}", ends=outcome)
         return self._react(cur, step, r, outcome, matched)
 
     def _react(self, cur: Cursor, step: Step, r: Reaction, outcome: str, matched: bool,
                because: str = "") -> Transition:
         verdict = "ok" if matched else "diverted"
         if r.kind == "continue":
-            return Transition(self._advance(cur), verdict)
+            return self._go_on(cur, verdict)
+        if r.kind == "fail":
+            return Transition(None, "failed", f"{step.id} ended {outcome}: the walk says fail{because}", ends=outcome)
+        if r.kind == "skip":
+            return Transition(None, "ended", f"{step.id} ended {outcome}: the walk ends skipped{because}",
+                              ends=SKIPPED)
+        if r.kind == "end":
+            return Transition(None, "ended", f"{step.id} ended {outcome}: the walk ends {r.target}{because}",
+                              ends=r.target)
+        if r.kind == "ignore":
+            return self._go_on(cur, "ok" if matched else "ignored",
+                               "" if matched else f"{step.id} ended {outcome}: ignored, the walk goes on{because}")
         if r.kind == "stop":
             return Transition(None, "ok" if matched else "failed",
                               f"{step.id} ended {outcome}: plan says stop{because}")
@@ -764,9 +975,15 @@ class Validation:
 
 
 def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
-             data: dict, budget: int = 20000) -> Validation:
+             data: dict, budget: int = 20000, _memo: dict | None = None,
+             _prefix: str = "", _inner: dict | None = None) -> Validation:
     """Explore every reachable walk: the expected outcome of every step, plus every outcome
-    the plan reacts to. Check requires before each step and expect.state after it."""
+    the plan reacts to. Check requires before each step and expect.state after it. A walk
+    action is explored INSIDE too, from every state the outer walk reaches it in: its inner
+    steps' guards, reactions (an `ignore` whose skipped effect a later step needs is an
+    error here) and expectations, reported as `<step>/<inner step>: ...`."""
+    memo = {} if _memo is None else _memo
+    inner_progs = prog.inner if _inner is None else _inner
     v = Validation()
     walker = Walker(prog)
     seen: set = set()
@@ -789,7 +1006,7 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
         outcome = exp if run else SKIPPED
         v.walk.append(step.id if run else f"({step.id}: skipped, when)")
         if run:
-            state.update(produced(reg.actions[step.action], outcome, state))
+            state.update(produced(reg.actions[step.action], outcome, state, reg, compose=True))
         cur = walker.next(cur, outcome, state).cursor
 
     stack = [(walker.start(), dict(state0), {}, ())]
@@ -825,11 +1042,25 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
             before = " > ".join(trail[:-1][-6:]) or "the starting state"
             errs[f"{step.id}: requires {act.requires}, but {before} leaves {have}"] = None
             continue
+        inner = walk_of(act, reg)
+        if inner is not None:
+            iprog = inner_progs.get(f"{_prefix}{step.id}") or inner.program
+            mkey = (id(iprog), tuple(sorted(state.items())))
+            if mkey not in memo:
+                memo[mkey] = None                       # a walk that (indirectly) contains itself
+                memo[mkey] = simulate(rc, reg, iprog, state, data, budget, memo, f"{_prefix}{step.id}/",
+                                      inner_progs)
+            sub = memo[mkey]
+            if sub is not None:
+                for e in sub.errors:
+                    errs[f"{step.id}/{e}"] = None
+                for w in sub.warnings:
+                    warns[f"{step.id}/{w}"] = None
         exp = prog.expected(step.id)
         rules = prog.rules.get(step.id) or []
         outcomes = {exp.outcome} | set(prog.reactions.get(step.id, {})) | {o for r in rules for o in r.outcomes or []}
         for outcome in sorted(outcomes):
-            new = {**state, **produced(act, outcome, state)}
+            new = {**state, **produced(act, outcome, state, reg, compose=True)}
             if outcome == exp.outcome:
                 for var, val in exp.state.items():
                     if new.get(var) is not None and new[var] != val:

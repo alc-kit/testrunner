@@ -150,7 +150,9 @@ def resume_point(store: Store) -> str:
     end = next((e for e in last if e["event"] == "run_end"), None)
     if end is not None and end.get("passed"):
         raise ConfigError(f"--resume: the last run ({last[0].get('run', '?')}) passed; there is nothing to resume")
-    started = [e["step"] for e in last if e["event"] == "step_start" and "~probe" not in e["step"]]
+    # an `always` step ran BECAUSE the walk stopped earlier: the stop is where to resume
+    started = [e["step"] for e in last if e["event"] == "step_start" and "~probe" not in e["step"]
+               and not e.get("always")]
     if not started:
         raise ConfigError(f"--resume: the last run ({last[0].get('run', '?')}) started no step")
     why = (end or {}).get("why") or "no end recorded (killed?)"
@@ -412,6 +414,8 @@ def release(store: Store, style: Style) -> int:
 def listing(rc, reg) -> int:
     print("actions:")
     for a in sorted(reg.actions.values(), key=lambda a: a.name):
+        if a.inner_of is not None:      # a walk's inner step: part of its walk, never named alone
+            continue
         contract = []
         if a.requires:
             contract.append(f"requires {a.requires}")

@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Iterable
 
-from ..api import FAILED, OutcomeError
+from ..api import FAILED, OutcomeError, step_kind
 from ..proc import Proc, Result
 
 logger = logging.getLogger(__name__)   # not `log`: methods take a log= file name
@@ -86,3 +86,22 @@ class Vagrant:
 
     async def run(self, *args: str, log: str | None = None, echo: bool = True) -> Result:
         return await self._run(*args, log=log, echo=echo)
+
+
+@step_kind("vagrant", keys=("machines", "provider", "parallel", "log"))
+async def vagrant_step(spec, vg):
+    """A walk's `{vagrant: up|destroy, machines: [...], provider, parallel, log}` through the
+    subscriber's `vg` fixture. `up` refuses an empty machine list (vagrant would bring up EVERY
+    machine); `destroy` with no machines destroys all — say so explicitly with `machines: all`."""
+    verb, machines = spec["vagrant"], spec.get("machines")
+    if isinstance(machines, str) and machines != "all":
+        machines = [machines]
+    logger.info("vagrant step: %s %s", verb, machines)
+    if verb == "up":
+        return await vg.up(list(machines or []), provider=spec.get("provider"),
+                           parallel=bool(spec.get("parallel", True)), log=spec.get("log"))
+    if verb == "destroy":
+        if not machines:
+            raise OutcomeError(FAILED, "vagrant destroy: name the machines, or machines: all")
+        return await vg.destroy(None if machines == "all" else list(machines), log=spec.get("log"))
+    raise OutcomeError(FAILED, f"vagrant step: {verb!r} is not up or destroy")

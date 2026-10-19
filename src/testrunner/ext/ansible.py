@@ -50,8 +50,8 @@ import shlex
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..api import ERRORED, FAILED, OutcomeError
-from ..proc import Proc, Result
+from ..api import ERRORED, FAILED, OutcomeError, step_kind
+from ..proc import Proc, Result, fill_rules
 
 
 logger = logging.getLogger(__name__)   # not `log`: methods take a log= file name
@@ -253,6 +253,10 @@ class Ansible:
     def extra_args(extra: dict[str, Any] | None) -> list[str]:
         out: list[str] = []
         for k, v in (extra or {}).items():
+            if isinstance(v, (list, dict)):
+                # a structure as JSON: `k=[...]` would reach the play as a STRING
+                out += ["-e", json.dumps({k: v})]
+                continue
             if isinstance(v, bool):
                 v = "true" if v else "false"
             out += ["-e", f"{k}={v}"]
@@ -405,3 +409,38 @@ def _json_part(text: str) -> str:
             except json.JSONDecodeError:
                 continue
     return text
+
+
+def step_rules(rules: Any, root: Path) -> Any:
+    """A walk step's `rules:` — a list of rules, a file (relative to the subscriber's root), or a
+    template to fill: {file: <path>, NAME: value, ...} (@NAME@ placeholders, proc.fill_rules)."""
+    if isinstance(rules, str):
+        return Path(root) / rules
+    if isinstance(rules, dict):
+        values = {k: v for k, v in rules.items() if k != "file"}
+        if "file" not in rules:
+            raise OutcomeError(ERRORED, f"rules: a template needs file: <path> (got {sorted(rules)})")
+        try:
+            return fill_rules(Path(root) / str(rules["file"]), values)
+        except (ValueError, OSError) as e:
+            raise OutcomeError(ERRORED, f"rules {rules['file']}: {e}") from None
+    return rules
+
+
+@step_kind("playbook", keys=("limit", "extra", "rules", "log", "timeout", "args", "prompt_idle", "ask_operator"))
+async def playbook_step(spec, ans, run):
+    """A walk's `{playbook: <path>, limit, extra, rules, log, timeout, args, prompt_idle,
+    ask_operator}` through the subscriber's `ans` fixture (an Ansible), every rule of Ansible
+    included (no empty scope, one controller, forwarded arguments). Its Result is classified by
+    the step (`outcomes:`, then the exit code), so a REFUSAL can be the expected outcome."""
+    limit = spec.get("limit")
+    if isinstance(limit, (str, int)):
+        limit = [str(limit)]
+    rules = step_rules(spec.get("rules"), run.root)
+    logger.info("playbook step %s: limit %s, extra %s, rules %s, log %s", spec["playbook"],
+                limit if limit is not None else "(none: its own hosts)", sorted(spec.get("extra") or {}),
+                f"{len(rules)} filled" if isinstance(rules, list) else rules or "none", spec.get("log"))
+    return await ans.playbook(spec["playbook"], *[str(a) for a in spec.get("args") or []], limit=limit,
+                              extra=spec.get("extra"), rules=rules, log=spec.get("log"),
+                              timeout=spec.get("timeout"), check=False, prompt_idle=spec.get("prompt_idle"),
+                              ask_operator=spec.get("ask_operator", True))

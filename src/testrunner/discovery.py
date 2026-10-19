@@ -3,6 +3,10 @@
 Python exports are found pytest-style — import the modules the runner config names and
 pick up every object carrying a testrunner mark. Shell exports come from the runner
 config's `actions:` table: a command plus the same contract a decorator would declare.
+WALK actions (an `actions:` entry with `steps:`, in the runner config or an `action_files:`
+file) are built last, by walks.py, once every action they may call is known. Inner-step
+kinds and template resolvers come from the subscriber's modules and from each extension
+the runner config enables under `ext:` (`testrunner.ext.<name>`, and its `kinds` module).
 """
 from __future__ import annotations
 
@@ -15,7 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .api import (BUILTIN_OUTCOMES, MARK, ActionMark, FixtureMark, HookMark, ObserverMark)
+from .api import (BUILTIN_OUTCOMES, MARK, ActionMark, FixtureMark, HookMark, ObserverMark, ResolverMark,
+                  StepKindMark)
 from .config import ConfigError, RunnerConfig
 
 
@@ -25,7 +30,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class ActionSpec:
     name: str
-    kind: str                       # "python" | "shell"
+    kind: str                       # "python" | "shell" | "walk"; inner steps of a walk: "call" | "cmd"
     requires: dict[str, Any]
     produces: dict[str, Any]
     produces_on: dict[str, dict[str, Any]]
@@ -37,6 +42,12 @@ class ActionSpec:
     fn: Callable | None = None      # python
     shell: dict | None = None       # shell: {run, env, cwd, rules, exit_codes, timeout}
     source: str = ""
+    walk: Any = None                # walk: its WalkSpec (walks.py)
+    inner_of: str | None = None     # an inner step of this walk action (never named by a plan)
+    call: str | None = None         # call: the action this inner step runs
+    call_with: dict = field(default_factory=dict)   # call: its `with:`, rendered at run time
+    own_effects: bool = False       # call: the step declares produces/produces_on of its own
+    inner: dict | None = None       # cmd: {kind, spec, classify}
 
     @property
     def all_outcomes(self) -> frozenset[str]:
@@ -57,6 +68,9 @@ class Registry:
     fixtures: dict[str, FixtureSpec] = field(default_factory=dict)
     observers: dict[str, Callable] = field(default_factory=dict)
     hooks: dict[str, list[Callable]] = field(default_factory=dict)
+    # walks: inner-step kinds {name: (fn, keys, source)} and template resolvers {name: (fn, source)}
+    step_kinds: dict[str, tuple[Callable, tuple[str, ...], str]] = field(default_factory=dict)
+    resolvers: dict[str, tuple[Callable, str]] = field(default_factory=dict)
 
 
 def _module_files(entry: Path) -> list[Path]:
@@ -123,8 +137,13 @@ def collect(rc: RunnerConfig) -> Registry:
                 seen.add(id(obj))
                 where = f"{f.relative_to(rc.root) if f.is_relative_to(rc.root) else f}:{getattr(obj, '__name__', '?')}"
                 _register(reg, obj, mark, where)
+    _collect_extensions(reg, rc)
     for name, spec in rc.shell_actions.items():
+        if isinstance(spec, dict) and "steps" in spec:
+            continue                    # a walk action: walks.py builds it below
         _register_shell(reg, name, spec, rc)
+    from . import walks
+    walks.build(reg, rc)
     validate_registry(reg, rc)
     rc.config_hooks = list(reg.hooks.get("run_config", []))
     log.info("exports: %d action(s), %d fixture(s), observers %s, hooks %s", len(reg.actions), len(reg.fixtures),
@@ -154,11 +173,40 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
         if mark.var in reg.observers:
             raise ConfigError(f"two observers for state {mark.var!r}")
         reg.observers[mark.var] = obj
+    elif isinstance(mark, StepKindMark):
+        if mark.name in reg.step_kinds:
+            raise ConfigError(f"step kind {mark.name!r} exported twice: {reg.step_kinds[mark.name][2]} and {where}")
+        reg.step_kinds[mark.name] = (obj, mark.keys, where)
+    elif isinstance(mark, ResolverMark):
+        if mark.name in reg.resolvers:
+            raise ConfigError(f"resolver {mark.name!r} exported twice: {reg.resolvers[mark.name][1]} and {where}")
+        reg.resolvers[mark.name] = (obj, where)
     elif isinstance(mark, HookMark):
         if mark.name == "run_config" and inspect.iscoroutinefunction(obj):
             # it runs as the config LOADS, outside any event loop
             raise ConfigError(f"hook run_config must be a plain function, not async: {where}")
         reg.hooks.setdefault(mark.name, []).append(obj)
+
+
+def _collect_extensions(reg: Registry, rc: RunnerConfig) -> None:
+    """The inner-step kinds and resolvers of every extension the runner config enables
+    (`ext: {<name>: {...}}`): marks in `testrunner.ext.<name>` and `testrunner.ext.<name>.kinds`.
+    Only those two marks are taken from an extension: its fixtures stay the subscriber's call."""
+    for name in rc.ext:
+        for modname in (f"testrunner.ext.{name}", f"testrunner.ext.{name}.kinds"):
+            try:
+                module = importlib.import_module(modname)
+            except ModuleNotFoundError as e:
+                if e.name in (modname, f"testrunner.ext.{name}"):
+                    log.debug("extension %s: no module %s", name, modname)
+                    continue
+                raise
+            for obj in list(vars(module).values()):
+                mark = getattr(obj, MARK, None)
+                if isinstance(mark, (StepKindMark, ResolverMark)):
+                    _register(reg, obj, mark, f"{modname}:{getattr(obj, '__name__', '?')}")
+    if reg.step_kinds or reg.resolvers:
+        log.info("walk kinds %s, resolvers %s", sorted(reg.step_kinds), sorted(reg.resolvers))
 
 
 SHELL_KEYS = {"run", "env", "cwd", "rules", "exit_codes", "timeout", "requires", "produces",
