@@ -456,3 +456,33 @@ def test_the_machines_walk_kind_uses_the_rigs_provider(rig_root, tmp_path, monke
                      ({"machines": "halt", "names": ["n4"]}, "not up or destroy")):
         with pytest.raises(OutcomeError, match=msg):
             asyncio.run(k.machines_step(bad, rig, p, {}))
+
+
+# ── Rig.step_ansible: the `ans` fixture both rigs share (prepared once per walked step, never dry) ──
+
+def test_step_ansible_prepares_once_per_walked_step_and_never_in_a_dry_run(rig_root, tmp_path):
+    from types import SimpleNamespace as NS
+    from testrunner.ext.ansible import Ansible
+    from testrunner.proc import Proc
+    import yaml
+
+    class MyRig(Rig):                                    # a rig says where its automation is
+        ansible_dir = tmp_path
+    rig = MyRig(rig_root, yaml.safe_load(DEFAULT), rig_root / "configs" / "default.yml", "default")
+    p, seen = Proc(tmp_path, tmp_path / "logs"), []
+
+    async def prepare(a):
+        seen.append(a)
+    run = NS(dry=False)
+
+    def get(step):
+        return asyncio.run(rig.step_ansible(p, {}, step, run, prepare))
+    a = get(NS(id="grow", parent=None, index=3, action="grow"))
+    assert isinstance(a, Ansible) and len(seen) == 1
+    get(NS(id="grow/install", parent="grow", index="3.2", action="grow/install"))   # inner step: shared
+    assert len(seen) == 1
+    get(NS(id="verify", parent=None, index=4, action="verify"))                     # the next step: again
+    assert len(seen) == 2
+    run.dry = True
+    get(NS(id="later", parent=None, index=5, action="later"))                       # a dry run: never
+    assert len(seen) == 2
