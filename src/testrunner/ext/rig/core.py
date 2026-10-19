@@ -64,26 +64,11 @@ def render_rules(template: Path, **values: str) -> list[dict]:
     """A drive-rules template with @NAME@ placeholders, filled, with drive_rules' checks:
     no placeholder left, no value the template does not use, no empty value, every
     answer ending in a carriage return (raw-mode prompts take CR, not LF, as Enter)."""
-    rules = json.loads(Path(template).read_text())
-    if not isinstance(rules, list) or not rules:
-        die(f"{template}: must be a non-empty list of {{expect, send}}")
-    for k, v in values.items():
-        if not v:
-            die(f"{k} is empty — refusing to answer a gate with nothing")
-    used = {m for r in rules for k in ("expect", "send") for m in PLACEHOLDER.findall(r[k])}
-    unused = sorted(set(values) - used)
-    if unused:
-        die(f"{template} does not use {', '.join(unused)} — check the template and the caller")
-    missing = sorted(used - set(values))
-    if missing:
-        die(f"{template} needs {', '.join(missing)} — refusing to leave a placeholder in the answers")
-    filled = [{**r, **{k: PLACEHOLDER.sub(lambda m: values[m.group(1)], r[k]) for k in ("expect", "send")}}
-              for r in rules]
-    no_cr = [r["send"] for r in filled if not r["send"].endswith("\r")]
-    if no_cr:
-        die(f"{template}: send={no_cr[0]!r} has no trailing \\r — the prompt would never be submitted")
-    log.debug("drive rules %s filled with %s: %d rule(s)", Path(template).name, sorted(values), len(filled))
-    return filled
+    from ...proc import fill_rules
+    try:
+        return fill_rules(template, values)
+    except ValueError as e:
+        die(str(e))
 
 
 class Catalogue:

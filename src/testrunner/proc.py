@@ -63,6 +63,43 @@ class Rule:
                    spec["send"], float(spec.get("delay", DEFAULT_DELAY)), bool(spec.get("nolog", False)))
 
 
+PLACEHOLDER = re.compile(r"@([A-Z][A-Z0-9_]*)@")
+
+
+def fill_rules(template: Path | str, values: dict[str, Any]) -> list[dict]:
+    """A rules template (JSON or YAML) with @NAME@ placeholders, filled — with the checks that
+    keep an answer from being wrong in silence: no placeholder left, no value the template does
+    not use, no empty value, every answer ending in a carriage return (a raw-mode prompt takes
+    CR, not LF, as Enter). Raises ValueError saying which check refused."""
+    path = Path(template)
+    text = path.read_text()
+    if path.suffix in (".yml", ".yaml"):
+        import yaml
+        rules = yaml.safe_load(text)
+    else:
+        rules = json.loads(text)
+    if not isinstance(rules, list) or not rules:
+        raise ValueError(f"{path}: must be a non-empty list of {{expect, send}}")
+    values = {k: str(v) for k, v in values.items()}
+    for k, v in values.items():
+        if not v:
+            raise ValueError(f"{k} is empty — refusing to answer a gate with nothing")
+    used = {m for r in rules for k in ("expect", "send") for m in PLACEHOLDER.findall(str(r.get(k, "")))}
+    unused = sorted(set(values) - used)
+    if unused:
+        raise ValueError(f"{path} does not use {', '.join(unused)} — check the template and the caller")
+    missing = sorted(used - set(values))
+    if missing:
+        raise ValueError(f"{path} needs {', '.join(missing)} — refusing to leave a placeholder in the answers")
+    filled = [{**r, **{k: PLACEHOLDER.sub(lambda m: values[m.group(1)], r[k]) for k in ("expect", "send") if k in r}}
+              for r in rules]
+    no_cr = [r["send"] for r in filled if not str(r.get("send", "")).endswith("\r")]
+    if no_cr:
+        raise ValueError(f"{path}: send={no_cr[0]!r} has no trailing \\r — the prompt would never be submitted")
+    logger.debug("rules %s filled with %s: %d rule(s)", path.name, sorted(values), len(filled))
+    return filled
+
+
 def load_rules(rules: Any) -> list[Rule]:
     """A list of rule dicts, or a path to a JSON/YAML file holding one."""
     if rules is None:

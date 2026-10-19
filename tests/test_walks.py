@@ -435,3 +435,156 @@ def test_template_refuses_malformed(bad):
 def test_template_refuses_none_inside_text():
     with pytest.raises(template.TemplateError):
         r("x {a}", {"a": None})
+
+
+# ── extension kinds: ext.ansible `playbook`, ext.vagrant `vagrant` (stub binaries) ────────────
+
+EXT_MOD = MOD + '''
+from testrunner import fixture
+from testrunner.ext.ansible import Ansible
+from testrunner.ext.vagrant import Vagrant
+
+@fixture
+def ans(proc, run):
+    return Ansible(proc, cwd=run.root, inventory=run.root / "inv")
+
+@fixture
+def vg(proc, run):
+    return Vagrant(proc, cwd=run.root)
+'''
+
+
+@pytest.fixture
+def ext(s, tmp_path, monkeypatch):
+    import os
+    import stat
+    d = tmp_path / "bin"
+    d.mkdir()
+    rec = tmp_path / "calls.txt"
+    for name in ("ansible-playbook", "vagrant"):
+        p = d / name
+        p.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$(basename "$0") $*" >> {rec}\n'
+                     'cat "${STUB_SAY:-/dev/null}" 2>/dev/null\nexit "${STUB_RC:-0}"\n')
+        p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{d}:{os.environ['PATH']}")
+    s.write("mod.py", EXT_MOD)
+    s.write("testrunner.yml", RUNNER + "ext: {ansible: {}, vagrant: {}}\n")
+    s.calls = rec
+    return s
+
+
+PLAY = """
+actions:
+  install:
+    params: {target: [n1, n2], log: install.log}
+    steps:
+      - id: install
+        playbook: playbooks/install.yml
+        limit: "{param.target}"
+        extra: {encrypt: "true", who: "{param.target}"}
+        rules: {file: drive/rules.json, VICTIM: "n2"}
+        log: "{param.log}"
+  reprovision:
+    extends: install
+    params: {victim: n2}
+    steps:
+      - {id: install, limit: ["{param.victim}"], extra: {force: "true"}, log: reprovision.log}
+      - {id: create, vagrant: up, machines: ["{param.victim}"], parallel: false}
+"""
+
+
+def test_playbook_and_vagrant_kinds_run_with_rendered_values(ext, capsys):
+    ext.write("drive/rules.json", '[{"expect": "victim @VICTIM@\\\\?", "send": "@VICTIM@\\r"}]')
+    ext.write("walks/main.yml", PLAY)
+    code = main(["--root", str(ext.root), "--color", "never", "--non-interactive", "reprovision"])
+    out = capsys.readouterr()
+    assert code == 0, out.out + out.err
+    calls = ext.calls.read_text().splitlines()
+    # `who` IS one reference: the list itself, passed to ansible as JSON (never a Python repr)
+    assert calls[0] == f"ansible-playbook playbooks/install.yml -i {ext.root / 'inv'} --limit n2 " \
+                       '-e encrypt=true -e {"who": ["n1", "n2"]} -e force=true'
+    assert calls[1] == "vagrant up --no-parallel n2"
+    assert (ext.root / "state" / "logs" / "reprovision.log").exists()
+
+
+def test_a_rules_template_that_is_not_filled_completely_errors_the_step(ext, capsys):
+    ext.write("drive/rules.json", '[{"expect": "@VICTIM@ @OTHER@", "send": "y\\r"}]')
+    ext.write("walks/main.yml", PLAY)
+    code = main(["--root", str(ext.root), "--color", "never", "--non-interactive", "install"])
+    out = capsys.readouterr().out
+    assert code != 0 and "needs OTHER" in out
+    assert not ext.calls.exists()                # refused before ansible ran
+
+
+def test_a_playbook_refusal_is_classified_and_expected(ext, capsys, monkeypatch):
+    ext.write("say", "FAILED: Tang servers this host does not declare: http://tang.invalid\n")
+    monkeypatch.setenv("STUB_SAY", str(ext.root / "say"))
+    monkeypatch.setenv("STUB_RC", "2")
+    ext.write("walks/main.yml", """
+actions:
+  foreign:
+    steps:
+      - id: provoke
+        playbook: playbooks/encrypt.yml
+        outcomes: {refused: {exit: nonzero, output: "does not declare: http://tang\\\\.invalid"}}
+        expect: refused
+""")
+    code = main(["--root", str(ext.root), "--color", "never", "--non-interactive", "foreign"])
+    out = capsys.readouterr()
+    assert code == 0, out.out + out.err
+    monkeypatch.setenv("STUB_RC", "0")           # negative control: accepted is not refused
+    (ext.root / "state" / "state.json").unlink(missing_ok=True)
+    code = main(["--root", str(ext.root), "--color", "never", "--non-interactive", "foreign"])
+    assert code != 0
+
+
+def test_a_kind_without_its_extension_is_refused_at_load(s, capsys):
+    code, out, _, _ = go(s, capsys, PLAY, "install")
+    assert code != 0 and "exactly ONE of action, run" in out
+
+
+# ── ext.rig resolvers (a duck-typed rig: they only use its public API) ──────────────────────
+
+class FakeCatalogue:
+    def role1(self, name):
+        return {"founder": "n1"}[name]
+
+    def role(self, name):
+        return {"victims": ["n2", "n3"]}.get(name, [])
+
+
+class FakeRig:
+    catalogue = FakeCatalogue()
+    founder = "n1"
+
+    def late_node(self, params):
+        return params.get("late", "n9")
+
+    async def live_nodes(self, vg):
+        return ["n1", "n2"]
+
+    async def live_limit(self, vg):
+        return await self.live_nodes(vg)
+
+
+class FakeAns:
+    async def hostvar(self, host, expr):
+        return {"n1/cluster_name": "c1"}.get(f"{host}/{expr}", "")
+
+
+def test_rig_resolvers():
+    from testrunner.api import OutcomeError
+    from testrunner.ext.rig import kinds as k
+    rig, ans = FakeRig(), FakeAns()
+    run = asyncio.run
+    assert run(k.live(rig, None)) == ["n1", "n2"]
+    assert k.role("founder", rig) == "n1"
+    assert k.roles("victims", rig) == ["n2", "n3"]
+    assert run(k.rig_attr("founder", rig, {})) == "n1"
+    assert run(k.rig_attr("late_node", rig, {"late": "n4"})) == "n4"
+    assert run(k.inventory("n1/cluster_name", ans)) == "c1"
+    assert run(k.peer_of("n1", rig, None)) == "n2"
+    for bad in (lambda: k.roles("nope", rig), lambda: run(k.rig_attr("_private", rig, {})),
+                lambda: run(k.inventory("n1.cluster_name", ans)), lambda: run(k.inventory("n2/x", ans))):
+        with pytest.raises(OutcomeError):
+            bad()
