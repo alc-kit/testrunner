@@ -18,11 +18,11 @@ pytestmark = pytest.mark.skipif(shutil.which("ruby") is None and not os.environ.
                                 reason="needs ruby (CI always has it: a missing ruby FAILS there)")
 
 CATALOGUE = {"machines": [
-    {"name": "cache", "kind": "support", "ip": "10.9.0.5", "mem": 512, "cpu": 1, "disks": 0, "size": 0,
+    {"name": "cache", "kind": "support", "ip": "192.0.2.5", "mem": 512, "cpu": 1, "disks": 0, "size": 0,
      "optional": "apt_cache"},
-    {"name": "node-1", "kind": "pve", "ip": "10.9.0.11", "mem": 2048, "cpu": 2, "disks": 2, "size": 4,
+    {"name": "node-1", "kind": "pve", "ip": "192.0.2.11", "mem": 2048, "cpu": 2, "disks": 2, "size": 4,
      "overrides": {"mem": "node_mem"}},
-    {"name": "node-2", "kind": "pve", "ip": "10.9.0.12", "mem": 2048, "cpu": 2, "disks": 2, "size": 4,
+    {"name": "node-2", "kind": "pve", "ip": "192.0.2.12", "mem": 2048, "cpu": 2, "disks": 2, "size": 4,
      "late": True},
 ]}
 DEFAULT = 'require_relative "testrunner/src/testrunner/ext/rig/vagrant/rig"\nRigVagrant.configure(root: __dir__, network: "toy-net")\n'
@@ -72,7 +72,7 @@ def test_default_builds_the_catalogue(rig):
     assert r.returncode == 0, r.stderr
     assert defined(log) == [("cache", "true"), ("node-1", "true"), ("node-2", "false")]   # late: no autostart
     net = calls(log, "node-1", "network")[0]
-    assert net[3] == {"ip": "10.9.0.11", "libvirt__network_name": "toy-net", "libvirt__dhcp_enabled": "false",
+    assert net[3] == {"ip": "192.0.2.11", "libvirt__network_name": "toy-net", "libvirt__dhcp_enabled": "false",
                       "libvirt__forward_mode": "nat"}
     lv = {c[1]: c[2] for c in log if c[0] == "config.vm.define[node-1].vm.provider[libvirt]"}
     assert lv["memory="] == ["2048"] and lv["nic_model_type="] == ["virtio"]
@@ -80,7 +80,7 @@ def test_default_builds_the_catalogue(rig):
     assert [d[3]["size"] for d in disks] == ["4G", "4G"]                     # the catalogue's two data disks
     pve = inline(log, "node-1")
     assert "names=1" in pve[0] and "console=1" in pve[0]                     # pve: names + console first
-    assert "Acquire::http::Proxy \"http://10.9.0.5:3128\"" in pve[1]         # then the cache client
+    assert "Acquire::http::Proxy \"http://192.0.2.5:3128\"" in pve[1]         # then the cache client
     assert "ssh-ed25519 AAAAtest toy" in pve[2]                               # then root login
     assert "http_port 3128" in inline(log, "cache")[-1]                        # the squid box, from squid.conf
     assert not any("Acquire::" in s for s in inline(log, "cache"))            # never a client of itself
