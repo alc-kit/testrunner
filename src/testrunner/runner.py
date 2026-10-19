@@ -439,7 +439,8 @@ class Runner:
                      prefix + program.main[last_main].id if last_main >= 0 else "its start", end.why)
             token = STEP.set(full)
             try:
-                sr = await self._step(run, run_scope, step, f"{label}{index}", data, program=program, prefix=prefix)
+                sr = await self._step(run, run_scope, step, f"{label}{index}", data, program=program, prefix=prefix,
+                                      always=True)
             finally:
                 STEP.reset(token)
             sr.verdict = "always"
@@ -541,7 +542,8 @@ class Runner:
         return True, f"retry {attempt + 1}/{total}: {'; '.join(why_if)}"
 
     async def _step(self, run: RunContext, run_scope: Scope, step: Step, index: int | str, data: dict,
-                    attempt: str = "", program: Program | None = None, prefix: str = "") -> StepResult:
+                    attempt: str = "", program: Program | None = None, prefix: str = "",
+                    always: bool = False) -> StepResult:
         rc = self.rc
         program = program or run.program
         act = self.reg.actions[step.action]
@@ -576,7 +578,7 @@ class Runner:
                                          + (f" ({act.name})" if act.name != sid else "")
                                          + (f" attempt {attempt}" if attempt else "") + " ===="))
         self.journal("step_start", step=sid, action=act.name, params=params,
-                     **({"attempt": attempt} if attempt else {}))
+                     **({"attempt": attempt} if attempt else {}), **({"always": True} if always else {}))
         run.last_output = ""
         await self.hook("step_start", run=run, step=ctx)
         ok, unknown = requires_holds(act.requires, run.state)
@@ -736,9 +738,13 @@ class Runner:
         w = act.walk
         log.info("%s: walk action %s — inner steps %s; params %s (defaults %s)", ctx.id, act.name,
                  [s.id for s in w.program.main], ctx.params or "{}", w.params or "{}")
+        program = self._run_ctx.program.inner.get(ctx.id) or w.program
+        if program is not w.program:
+            log.info("%s: this run's own copy of the walk (edits / a start inside it): %s", ctx.id,
+                     [s.id for s in program.main])
         self._frames.append(WalkFrame(w, ctx.params, ctx))
         try:
-            end = await self._walk(self._run_ctx, self._run_scope, w.program, step_data,
+            end = await self._walk(self._run_ctx, self._run_scope, program, step_data,
                                    prefix=f"{ctx.id}/", label=f"{ctx.index}.")
         finally:
             self._frames.pop()

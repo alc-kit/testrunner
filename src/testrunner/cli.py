@@ -150,7 +150,9 @@ def resume_point(store: Store) -> str:
     end = next((e for e in last if e["event"] == "run_end"), None)
     if end is not None and end.get("passed"):
         raise ConfigError(f"--resume: the last run ({last[0].get('run', '?')}) passed; there is nothing to resume")
-    started = [e["step"] for e in last if e["event"] == "step_start" and "~probe" not in e["step"]]
+    # an `always` step ran BECAUSE the walk stopped earlier: the stop is where to resume
+    started = [e["step"] for e in last if e["event"] == "step_start" and "~probe" not in e["step"]
+               and not e.get("always")]
     if not started:
         raise ConfigError(f"--resume: the last run ({last[0].get('run', '?')}) started no step")
     why = (end or {}).get("why") or "no end recorded (killed?)"

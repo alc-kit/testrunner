@@ -588,3 +588,64 @@ def test_rig_resolvers():
                 lambda: run(k.inventory("n1.cluster_name", ans)), lambda: run(k.inventory("n2/x", ans))):
         with pytest.raises(OutcomeError):
             bad()
+
+
+# ── T-D9: inner steps in edit:, --skip, --from and --resume ─────────────────────────────────
+
+FLAKY = """
+actions:
+  w:
+    steps:
+      - {id: first, run: "echo first >> trail"}
+      - id: apt
+        run: "n=$(cat n 2>/dev/null || echo 0); n=$((n+1)); echo $n > n; echo 'Could not get lock'; [ $n -ge 2 ]"
+      - {id: last, run: "echo last >> trail"}
+      - {id: cleanup, run: "echo cleanup >> trail", always: true}
+"""
+
+
+def test_edit_retry_reaches_an_inner_step(s, capsys):
+    s.write("configs/c.yml", "plan: [w]\nedit: [{retry: w/apt, times: 1, if: {output: 'Could not get lock'}}]\n")
+    code, out, ev, trail = go(s, capsys, FLAKY, "-c", "c")
+    assert code == 0, out
+    assert ends(ev) == [("w/first", "passed"), ("w/apt", "failed"), ("w/apt", "passed"), ("w/last", "passed"),
+                        ("w/cleanup", "passed"), ("w", "passed")]
+    # negative control: the same walk without the edit fails at w/apt
+    import shutil
+    shutil.rmtree(s.root / "state")          # a fresh scenario: the claimed one carries the edit (T9)
+    for f in ("n", "trail"):
+        (s.root / f).unlink(missing_ok=True)
+    code, out, ev, trail = go(s, capsys, FLAKY, "w")
+    assert code != 0 and ("w/apt", "failed") in ends(ev)
+
+
+def test_skip_an_inner_step_from_the_command_line(s, capsys):
+    code, out, ev, trail = go(s, capsys, GROW, "grow", "--skip", "grow/install")
+    assert code == 0, out
+    assert trail == ["create", "join"]
+
+
+def test_only_retry_and_skip_reach_inside_a_walk(s, capsys):
+    s.write("configs/c.yml", "plan: [w]\nedit: [{insert: [diag], after: w/first}]\n")
+    code, out, _, _ = go(s, capsys, FLAKY, "-c", "c")
+    assert code != 0 and "can only be retried or skipped" in out
+    s.write("configs/c.yml", "plan: [w]\nedit: [{retry: w/nope}]\n")
+    code, out, _, _ = go(s, capsys, FLAKY, "-c", "c")
+    assert code != 0 and "has no step 'nope'" in out
+
+
+def test_resume_starts_inside_the_walk_where_it_stopped_not_at_the_always_step(s, capsys):
+    s.write("configs/default.yml", "plan: [w]\n")
+    code, out, ev, trail = go(s, capsys, FLAKY)
+    assert code != 0
+    assert trail == ["first", "cleanup"]                 # cleanup ran (always) after w/apt failed
+    (s.root / "trail").unlink()
+    code, out, ev, trail = go(s, capsys, FLAKY, "--resume")
+    assert code == 0, out
+    assert trail == ["last", "cleanup"]                  # w/first NOT re-run; resumed at w/apt
+
+
+def test_from_an_inner_step(s, capsys):
+    code, out, ev, trail = go(s, capsys, GROW, "grow", "--from", "grow/join")
+    assert code == 0, out
+    assert trail == ["join"]

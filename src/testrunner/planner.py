@@ -146,6 +146,9 @@ class Program:
     # walks: a reaction segment that ends in a word ([collect-logs, fail]): segment key ->
     # (that reaction, the outcome that started the segment, or None for a rule)
     segment_then: dict[str, tuple[Reaction, str | None]] = field(default_factory=dict)
+    # THIS run's copies of walk programs, by the walk step's full id ("addnode", "a/b"): what
+    # `edit:` retry/skip of an inner step and --from/--resume inside a walk change (T-D9)
+    inner: dict[str, "Program"] = field(default_factory=dict)
 
     @property
     def main(self) -> list[Step]:
@@ -363,18 +366,23 @@ class Compiler:
             log.info("%s: %s spliced %s %s", where, [s.id for s in new], "after" if "after" in d else "before",
                      anchor)
         transitions: dict[str, tuple[str, Any]] = {}       # step id -> (where, rules), from `edit:`
-        done = self._apply_edits(edits, main, make, ids, adhoc, notes, transitions=transitions)
-        done += self._apply_edits(cli_edits, main, make, ids, True, notes, label="--edit", transitions=transitions)
+        inner: dict[str, Program] = {}
+        done = self._apply_edits(edits, main, make, ids, adhoc, notes, transitions=transitions, inner=inner)
+        done += self._apply_edits(cli_edits, main, make, ids, True, notes, label="--edit", transitions=transitions,
+                                  inner=inner)
         if done:
             source += f"; edits: {', '.join(done)}"
         if start_at is not None:
-            idx = next((n for n, s in enumerate(main) if s.id == start_at), None)
+            outer = start_at.split("/")[0]
+            idx = next((n for n, s in enumerate(main) if s.id == outer), None)
             if idx is None:
                 raise ConfigError(f"--from {start_at}: not a step on the walk "
                                   f"(on it: {', '.join(s.id for s in main) or 'nothing'})")
             if idx:
                 log.info("--from %s: the walk starts there; %s left out", start_at, [s.id for s in main[:idx]])
             del main[:idx]
+            if "/" in start_at:
+                self._start_inside(main, start_at, inner, notes)
             source += f"; from {start_at}"
         segments = {MAIN: main}
         reactions: dict[str, dict[str, Reaction]] = {}
@@ -457,7 +465,7 @@ class Compiler:
             if not isinstance(e, dict) or set(e) - {"outcome", "state"}:
                 raise ConfigError(f"plan.expect.{sid}: want {{outcome: ..., state: {{...}}}}")
             expect[sid] = Expect(e.get("outcome", PASSED), dict(e.get("state") or {}))
-        prog = Program(segments, reactions, expect, params, notes, source, rules, segment_then)
+        prog = Program(segments, reactions, expect, params, notes, source, rules, segment_then, inner)
         self._check_references(prog, adhoc or start_at is not None)
         log.info("compiled: main %s", [f"{s.id}" + (f"(={s.action})" if s.action != s.id else "") for s in prog.main])
         for s in prog.steps():
@@ -473,9 +481,58 @@ class Compiler:
             log.info("  note: %s", n)
         return prog
 
+    def _inner_step(self, main: list[Step], sid: str, inner: dict, where: str) -> tuple["Program", str, str] | None:
+        """`walk/step[/step...]`: this run's copy of the program holding the last part (made, and
+        kept in `inner` by the walk step's full id), that part's local id, and the copy's key.
+        None when the first part is not on the walk."""
+        parts = sid.split("/")
+        step = next((s for s in main if s.id == parts[0]), None)
+        if step is None:
+            return None
+        key = parts[0]
+        for i in range(1, len(parts)):
+            w = walk_of(self.reg.actions[step.action], self.reg)
+            if w is None:
+                raise ConfigError(f"{where}: {key} is not a walk action, so {sid!r} names no inner step")
+            if key not in inner:
+                inner[key] = copy.deepcopy(w.program)
+                log.debug("%s: this run's own copy of walk %s's program (for %s)", where, w.name, key)
+            prog = inner[key]
+            nxt = next((s for s in prog.main if s.id == parts[i]), None)
+            if nxt is None:
+                raise ConfigError(f"{where}: walk {w.name} ({key}) has no step {parts[i]!r} "
+                                  f"(it has {', '.join(s.id for s in prog.main)})")
+            if i == len(parts) - 1:
+                return prog, parts[i], key
+            key, step = f"{key}/{parts[i]}", nxt
+        return None
+
+    def _recheck_inner(self, prog: "Program", key: str, notes: list[str]) -> None:
+        owner = next((a.inner_of for s in prog.main for a in [self.reg.actions[s.action]] if a.inner_of), None)
+        before = len(prog.notes)
+        Compiler(self.rc, self.reg, walk=owner)._check_references(prog, True)
+        notes += [f"{key}: {n}" for n in prog.notes[before:]]
+
+    def _start_inside(self, main: list[Step], start_at: str, inner: dict, notes: list[str]) -> None:
+        """--from/--resume at an inner step: every level of the walk starts there (T-D9)."""
+        parts = start_at.split("/")
+        for i in range(2, len(parts) + 1):
+            found = self._inner_step(main, "/".join(parts[:i]), inner, f"--from {start_at}")
+            if found is None:
+                return
+            prog, local, key = found
+            idx = next(n for n, s in enumerate(prog.main) if s.id == local)
+            if idx:
+                log.info("--from %s: walk %s starts at %s; %s left out", start_at, key, local,
+                         [s.id for s in prog.main[:idx]])
+            del prog.main[:idx]
+            self._recheck_inner(prog, key, notes)
+
     def _apply_edits(self, edits: Any, main: list[Step], make, ids: _Ids, adhoc: bool,
-                     notes: list[str], label: str = "edit", transitions: dict | None = None) -> list[str]:
-        """Apply the walk edits to `main` in place; return what was done, for the banner."""
+                     notes: list[str], label: str = "edit", transitions: dict | None = None,
+                     inner: dict | None = None) -> list[str]:
+        """Apply the walk edits to `main` in place; return what was done, for the banner. An
+        inner step (`addnode/install`) may be retried or skipped — nothing else (T-D9)."""
         if edits is None:
             return []
         if not isinstance(edits, list):
@@ -497,6 +554,35 @@ class Compiler:
                 raise ConfigError(f"{where}: {op} needs exactly one of after: or before: <step id>")
             if op == "replace" and "by" not in ed:
                 raise ConfigError(f"{where}: replace needs by: [steps...]")
+
+            targets = [ed[op]] if op != "skip" or not isinstance(ed[op], list) else ed[op]
+            if any(isinstance(t, str) and "/" in t for t in targets) or any(
+                    isinstance(ed.get(k), str) and "/" in ed[k] for k in ("after", "before")):
+                if op not in ("retry", "skip"):
+                    raise ConfigError(f"{where}: {op} cannot reach inside a walk action; an inner step "
+                                      f"(walk/step) can only be retried or skipped")
+                for t in targets:
+                    if "/" not in str(t):
+                        raise ConfigError(f"{where}: skip mixes inner and outer steps; give them separately")
+                    found = self._inner_step(main, str(t), inner if inner is not None else {}, where)
+                    if found is None:
+                        if not adhoc:
+                            raise ConfigError(f"{where}: {op}: {t!r}: {str(t).split('/')[0]!r} is not a step on "
+                                              f"the walk (on it: {', '.join(s.id for s in main) or 'nothing'})")
+                        notes.append(f"{where} ({op} {t!r}) dropped: not in this run")
+                        continue
+                    prog, local, key = found
+                    if op == "retry":
+                        st = next(s for s in prog.main if s.id == local)
+                        st.retry = retry_spec({k: v for k, v in ed.items() if k != "retry"}, where)
+                        Compiler(self.rc, self.reg)._check_retry(st)
+                        done.append(f"retry {t} x{st.retry['times']}")
+                    else:
+                        prog.main[:] = [s for s in prog.main if s.id != local]
+                        self._recheck_inner(prog, key, notes)
+                        done.append(f"-{t}")
+                    log.info("%s: %s %s inside walk step %s", where, op, local, key)
+                continue
 
             def at(sid: Any, what: str) -> int | None:
                 idx = next((n for n, s in enumerate(main) if s.id == sid), None)
@@ -744,7 +830,8 @@ def reaction_text(prog: Program, r: Reaction) -> str:
     return r.kind
 
 
-def matrix(prog: Program, reg: Registry, prefix: str = "", depth: int = 0) -> list[dict[str, str]]:
+def matrix(prog: Program, reg: Registry, prefix: str = "", depth: int = 0,
+           inner_progs: dict | None = None) -> list[dict[str, str]]:
     """The state/event matrix of the main walk: per step and outcome (the event), the state it
     needs, the state it leaves, and what comes next. `*` marks the expected outcome. A walk
     action's inner steps follow its rows, indented, as `<step>/<inner step>`."""
@@ -774,7 +861,8 @@ def matrix(prog: Program, reg: Registry, prefix: str = "", depth: int = 0) -> li
                          "outcome": o + ("*" if o == exp else ""), "after": after, "next": nxt})
         inner = walk_of(act, reg)
         if inner is not None and depth < 6:
-            rows += matrix(inner.program, reg, f"{prefix}{s.id}/", depth + 1)
+            ip = prog.inner if inner_progs is None else inner_progs
+            rows += matrix(ip.get(f"{prefix}{s.id}") or inner.program, reg, f"{prefix}{s.id}/", depth + 1, ip)
     return rows
 
 
@@ -887,13 +975,15 @@ class Validation:
 
 
 def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
-             data: dict, budget: int = 20000, _memo: dict | None = None) -> Validation:
+             data: dict, budget: int = 20000, _memo: dict | None = None,
+             _prefix: str = "", _inner: dict | None = None) -> Validation:
     """Explore every reachable walk: the expected outcome of every step, plus every outcome
     the plan reacts to. Check requires before each step and expect.state after it. A walk
     action is explored INSIDE too, from every state the outer walk reaches it in: its inner
     steps' guards, reactions (an `ignore` whose skipped effect a later step needs is an
     error here) and expectations, reported as `<step>/<inner step>: ...`."""
     memo = {} if _memo is None else _memo
+    inner_progs = prog.inner if _inner is None else _inner
     v = Validation()
     walker = Walker(prog)
     seen: set = set()
@@ -954,10 +1044,12 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
             continue
         inner = walk_of(act, reg)
         if inner is not None:
-            mkey = (id(inner.program), tuple(sorted(state.items())))
+            iprog = inner_progs.get(f"{_prefix}{step.id}") or inner.program
+            mkey = (id(iprog), tuple(sorted(state.items())))
             if mkey not in memo:
                 memo[mkey] = None                       # a walk that (indirectly) contains itself
-                memo[mkey] = simulate(rc, reg, inner.program, state, data, budget, memo)
+                memo[mkey] = simulate(rc, reg, iprog, state, data, budget, memo, f"{_prefix}{step.id}/",
+                                      inner_progs)
             sub = memo[mkey]
             if sub is not None:
                 for e in sub.errors:
