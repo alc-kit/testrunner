@@ -657,3 +657,47 @@ def test_the_report_shows_a_failed_inner_steps_log(s, capsys):
     assert code != 0
     md = (s.root / "state" / "reports" / "latest.md").read_text()
     assert "grow/join" in md and "logs/grow.join.log" in md and "the join broke" in md
+
+
+def test_config_resolver_and_require_nodes_kind():
+    from types import SimpleNamespace
+    from testrunner.api import OutcomeError
+    from testrunner.ext.rig import kinds as k
+
+    class Rig(FakeRig):
+        PREFIX = "MYRIG"
+        seen = []
+
+        def e(self, name, params=None, default=None):
+            return {"EGRESS": "group"}.get(name, default)
+
+        async def require_nodes(self, vg, stage, *nodes, subset=None):
+            self.seen.append((stage, nodes, subset))
+            missing = [n for n in nodes if n not in ("n1", "n2")]
+            if missing:
+                raise OutcomeError("failed", f"{stage} needs {missing[0]}")
+            return ["n1", "n2"]
+    rig = Rig()
+    assert k.config("EGRESS", rig, {}) == "group"
+    assert k.config("ISOLATION|0", rig, {}) == "0"
+    assert k.config("ISOLATION|", rig, {}) == ""
+    with pytest.raises(OutcomeError, match="MYRIG_ISOLATION is unset"):
+        k.config("ISOLATION", rig, {})
+    step = SimpleNamespace(parent="reprovision", id="reprovision/guard")
+    asyncio.run(k.require_nodes({"require_nodes": ["n2"]}, rig, None, {}, step))
+    assert rig.seen[-1] == ("reprovision", ("n2",), None)
+    with pytest.raises(OutcomeError, match="reprovision needs n9"):
+        asyncio.run(k.require_nodes({"require_nodes": "n9"}, rig, None, {}, step))
+
+
+def test_a_resolved_list_inside_a_limit_is_spliced(ext, capsys):
+    ext.write("walks/main.yml", """
+actions:
+  w:
+    params: {nodes: [n1, n2]}
+    steps:
+      - {id: p, playbook: verify.yml, limit: ["{param.nodes}", cache_hosts]}
+""")
+    code = main(["--root", str(ext.root), "--color", "never", "--non-interactive", "w"])
+    assert code == 0, capsys.readouterr()
+    assert "--limit n1,n2,cache_hosts" in ext.calls.read_text()

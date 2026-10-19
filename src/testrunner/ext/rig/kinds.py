@@ -7,6 +7,14 @@
                                             (a method is called, with the step's params if it takes them)
     cluster: "{inventory:{param.founder}/cluster_name}"   a host variable, as ansible resolves it
     peer: "{peer_of:{param.node}}"          a live node that is not the one named
+    mode: "{config:GUEST_EGRESS|none}"      a rig variable (PREFIX_NAME) as this step resolves it;
+                                            unset without a `|default` is refused, by name
+
+and one inner-step kind:
+
+    - {require_nodes: ["{param.victim}"]}   refuse unless every named node EXISTS in the rig
+                                            (a stage hard-wired to a node; ansible would skip a
+                                            missing one with exit 0)
 
 They take the subscriber's `rig`, `vg` and `ans` fixtures by name, as actions do. Every
 value is logged (the runner logs each resolution), so a run that targeted the wrong node says
@@ -17,7 +25,7 @@ from __future__ import annotations
 import inspect
 import logging
 
-from ...api import ERRORED, FAILED, OutcomeError, resolver
+from ...api import ERRORED, FAILED, OutcomeError, resolver, step_kind
 
 log = logging.getLogger(__name__)
 
@@ -76,3 +84,29 @@ async def peer_of(arg, rig, vg):
     if not peers:
         raise OutcomeError(FAILED, f"no live node besides {arg}")
     return peers[0]
+
+
+@resolver("config")
+def config(arg, rig, params):
+    name, sep, default = arg.partition("|")
+    if not name:
+        raise OutcomeError(ERRORED, "{config:<NAME>[|default]}: name the variable")
+    value = rig.e(name, params)
+    if value is None:
+        if sep:
+            log.debug("{config:%s}: %s_%s unset -> the default %r", arg, rig.PREFIX, name, default)
+            return default
+        raise OutcomeError(FAILED, f"the rig variable {rig.PREFIX}_{name} is unset, and this step needs it "
+                                   f"(set it in the run config, or give a default: {{config:{name}|<value>}})")
+    return value
+
+
+@step_kind("require_nodes")
+async def require_nodes(spec, rig, vg, params, step):
+    nodes = spec["require_nodes"]
+    nodes = [nodes] if isinstance(nodes, str) else [str(n) for n in nodes or []]
+    if not nodes:
+        raise OutcomeError(ERRORED, "require_nodes: name at least one node")
+    stage = step.parent or step.id
+    log.info("%s needs %s to exist", stage, nodes)
+    await rig.require_nodes(vg, stage, *nodes, subset=rig.e("NODES", params))

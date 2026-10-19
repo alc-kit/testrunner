@@ -436,6 +436,9 @@ async def playbook_step(spec, ans, run):
     limit = spec.get("limit")
     if isinstance(limit, (str, int)):
         limit = [str(limit)]
+    elif isinstance(limit, list):
+        # ["{live}", cache_hosts]: a resolved list inside the list is spliced in place
+        limit = [str(h) for x in limit for h in (x if isinstance(x, list) else [x])]
     rules = step_rules(spec.get("rules"), run.root)
     logger.info("playbook step %s: limit %s, extra %s, rules %s, log %s", spec["playbook"],
                 limit if limit is not None else "(none: its own hosts)", sorted(spec.get("extra") or {}),
