@@ -82,6 +82,12 @@ def parser() -> argparse.ArgumentParser:
                    help="never ask the operator; an unanswered prompt fails its step")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--plan", action="store_true", help="validate and print the walk, run nothing")
+    g.add_argument("--dry-run", action="store_true",
+                   help="walk the plan against the real config and state: run only what looks (observers, "
+                        "read-only guards), print each command the rest would run; lock, claim and store nothing")
+    p.add_argument("--dry-outcome", action="append", default=[], metavar="STEP=OUTCOME",
+                   help="with --dry-run: assume STEP (an inner step too: walk/step) ends with OUTCOME, to "
+                        "explore that branch (repeatable)")
     p.add_argument("--matrix", action="store_true",
                    help="also print the state/event matrix: per step and outcome, the state in and after, and what "
                         "comes next")
@@ -228,7 +234,7 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
                                   f"{shlex.join(args.forwarded)}")
         if not (args.status or args.scenario or args.list or args.report_of is not None):
             # everything that runs, plans, selects or releases leaves a trace
-            trace = logs.open_file(store.root / "logs", run_id)
+            trace = logs.open_file(store.root / "logs", run_id, dry=args.dry_run)
             log.info("run id %s; this trace: %s", run_id, trace)
         if args.status:
             return status(store, style)
@@ -277,7 +283,15 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
                  else "state-changing run", ", ".join(f"{s.id}={reg.actions[s.action].kind}"
                                                       f"{'/ro' if reg.actions[s.action].readonly else ''}"
                                                       for s in prog.main) or "no steps")
-        if sel.scenario is None and not args.plan and not readonly and prog.main:
+        if args.dry_outcome and not args.dry_run:
+            raise ConfigError("--dry-outcome needs --dry-run")
+        dry_outcomes = {}
+        for spec in args.dry_outcome:
+            sid, sep, outcome = spec.partition("=")
+            if not (sid and sep and outcome):
+                raise ConfigError(f"--dry-outcome {spec!r}: want STEP=OUTCOME")
+            dry_outcomes[sid] = outcome
+        if sel.scenario is None and not args.plan and not args.dry_run and not readonly and prog.main:
             log.info("no scenario in force and this run changes state: selecting one")
             sel = select(rc, store, args.config, claim=True, run_id=run_id)
             if not sel.claimed:    # a parallel runner selected first: compile against ITS config
@@ -287,7 +301,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
                                         sel.run_config.data.get("edit"), edits_now, start_at)
         elif sel.scenario is None:
             log.info("no scenario selected and none claimed (%s)",
-                     "--plan" if args.plan else "read-only" if readonly else "nothing to run")
+                     "--plan" if args.plan else "--dry-run" if args.dry_run else
+                     "read-only" if readonly else "nothing to run")
         run_config = sel.run_config
         logs.secrets = Secrets(values_at(run_config.data, run_config.nolog_paths))
         log.info("run config %s (chosen by %s)%s", run_config.file or "(none)", run_config.how,
@@ -311,7 +326,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
     try:
         runner = Runner(rc, reg, run_config, store, ui, color=args.color, run_id=run_id,
                         readonly=readonly, report_formats=formats if args.report else (),
-                        show_commands=args.show_commands, forwarded=tuple(args.forwarded))
+                        show_commands=args.show_commands, forwarded=tuple(args.forwarded),
+                        dry=args.dry_run, dry_outcomes=dry_outcomes)
     except FixtureError as e:
         log.error("refused before anything ran: %s", e)
         print(style.bad(f"ERROR: {e}"), file=sys.stderr)
@@ -365,6 +381,8 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
         log.error("the static check refused the plan: %s", "; ".join(v.errors))
         print(style.bad("ERROR: the plan cannot run as written (see above); nothing was started"), file=sys.stderr)
         return EXIT_USAGE
+    if args.dry_run:
+        print(style.banner("DRY RUN — only what looks runs; nothing is changed, locked, claimed or stored"))
     print(style.banner(f"steps: {prog.source}"))
     print(f"run config {src}: {' > '.join(v.walk)}")
     if args.forwarded:

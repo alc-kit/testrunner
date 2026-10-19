@@ -322,6 +322,40 @@ inside it. Inner steps are named `<walk>/<step>` in the trace, the journal, the 
 `--plan --matrix`; an `edit:` (or `--skip`) may retry or skip one, and `--from` / `--resume`
 start inside a walk (`--resume` after `addnode/join` failed does not rebuild the node).
 
+## Dry run
+
+`testrunner --dry-run [steps]` walks the plan against the real config and the observed state,
+judging every `when`, `requires` and transition as a run would, without changing anything:
+
+- what only LOOKS runs: the observers (at the start), read-only walk kinds (`require_hosts`,
+  `require_nodes`) and `refuse`, so a dry run shows the refusals a run would hit;
+- the commands the rest would run are printed, built by the same code that runs them:
+  `playbook:` with its argv, the answers its rules would type and its log; `vagrant:`,
+  `machines:`, `run:` and shell actions; a kind of your own describes itself with
+  `@step_kind(describe=fn)`;
+- a Python action is NOT run: it is marked "not run" and assumed to end with its expected
+  outcome, unless `@action(dry=fn)` describes what it would do;
+- a resolver that needs something absent (no rig: `{live}`) is shown unrendered, and said so;
+- every step is assumed to end with its expected outcome; `--dry-outcome STEP=OUTCOME`
+  (repeatable; an inner step too, `walk/step`) explores another branch. A retry is
+  described, not simulated.
+
+```
+$ testrunner --dry-run addnode
+==== [1] addnode (dry) ====
+==== [1.3] addnode/install (dry) ====
+     (dry) would run: ansible-playbook playbooks/install-proxmox.yml -i .../inventory --limit pve-val-4 -e ...   (in .../ansible)
+     (dry)   answers 'anything else to abort' -> 'YES\r'
+     (dry)   log addnode-install-pve-val-4.log
+```
+
+A dry run takes no lock, claims no scenario, writes no state and no journal, and does not
+re-read reality after a step (nothing changed). Its trace is `testrunner-dry-<id>.log`, never
+`testrunner-last.log`, so `--resume` never resumes from it. `run_start` hooks run (a subscriber's
+refusal of the run shows); `run.dry` tells them, and your fixtures, not to change anything. Step
+hooks and `run_end` hooks do not run. Exit 0 when the walk goes through as assumed, 1 when a
+guard, a refusal or a transition stops it.
+
 ## The scenario lock
 
 The first state-changing run in a directory **selects the scenario**: its resolved run

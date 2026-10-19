@@ -263,14 +263,10 @@ class Ansible:
         return out
 
     # ── running ──
-    async def playbook(self, playbook: str | Path, *args: str, limit: Iterable[str] | str | None = None,
-                       extra: dict[str, Any] | None = None, rules: Any = None, log: str | None = None,
-                       timeout: float | None = None, check: bool = True, echo: bool = True,
-                       prompt_idle: float | None = None, ask_operator: bool = True) -> Result:
-        """ansible-playbook PLAYBOOK [args] -i INVENTORY [--limit ...] [-e k=v ...].
-        check=True turns a non-zero exit into a FAILED outcome. ask_operator=False: a prompt
-        no rule answers ends the run instead of being forwarded (a gate that must NOT be passed).
-        The run's forwarded arguments come last; a forwarded --limit narrows `limit` (above)."""
+    async def playbook_command(self, playbook: str | Path, *args: str, limit: Iterable[str] | str | None = None,
+                               extra: dict[str, Any] | None = None) -> tuple[list[str], Any]:
+        """The argv playbook() would run, and the limit it would use — built, NOT run (--dry-run
+        prints it). Narrowing by a forwarded --limit asks ansible --list-hosts, which only looks."""
         if self.forwarded.limit is not None:
             if limit is None:
                 logger.info("playbook %s has no limit of its own: the forwarded --limit %s does not apply",
@@ -279,6 +275,17 @@ class Ansible:
                 limit = await self.narrow(limit, self.forwarded.limit)
         argv = [*self.argv(), str(playbook), *args, "-i", self.inventory,
                 *self.limit_arg(limit), *self.extra_args(extra), *self.forwarded.args]
+        return argv, limit
+
+    async def playbook(self, playbook: str | Path, *args: str, limit: Iterable[str] | str | None = None,
+                       extra: dict[str, Any] | None = None, rules: Any = None, log: str | None = None,
+                       timeout: float | None = None, check: bool = True, echo: bool = True,
+                       prompt_idle: float | None = None, ask_operator: bool = True) -> Result:
+        """ansible-playbook PLAYBOOK [args] -i INVENTORY [--limit ...] [-e k=v ...].
+        check=True turns a non-zero exit into a FAILED outcome. ask_operator=False: a prompt
+        no rule answers ends the run instead of being forwarded (a gate that must NOT be passed).
+        The run's forwarded arguments come last; a forwarded --limit narrows `limit` (above)."""
+        argv, limit = await self.playbook_command(playbook, *args, limit=limit, extra=extra)
         logger.info("playbook %s%s%s", playbook, f" --limit {','.join(limit) if not isinstance(limit, str) else limit}"
                  if limit is not None else " (whole inventory)", f" -e {sorted(extra)}" if extra else "")
         r = await self._run(argv, rules=rules, log=log, timeout=timeout, echo=echo,
@@ -427,18 +434,41 @@ def step_rules(rules: Any, root: Path) -> Any:
     return rules
 
 
-@step_kind("playbook", keys=("limit", "extra", "rules", "log", "timeout", "args", "prompt_idle", "ask_operator"))
+def _step_limit(spec: dict) -> Any:
+    limit = spec.get("limit")
+    if isinstance(limit, (str, int)):
+        return [str(limit)]
+    if isinstance(limit, list):
+        # ["{live}", cache_hosts]: a resolved list inside the list is spliced in place
+        return [str(h) for x in limit for h in (x if isinstance(x, list) else [x])]
+    return limit
+
+
+async def playbook_describe(spec, ans, run):
+    """--dry-run: the exact command playbook_step would run (argv, the answers its rules would
+    type, its log), built by the same code, never started."""
+    rules = step_rules(spec.get("rules"), run.root)
+    argv, _ = await ans.playbook_command(spec["playbook"], *[str(a) for a in spec.get("args") or []],
+                                         limit=_step_limit(spec), extra=spec.get("extra"))
+    lines = [f"{shlex.join(argv)}   (in {ans.cwd})"]
+    if isinstance(rules, list):
+        lines += [f"  answers {r.get('expect')!r} -> {'<NOLOG>' if r.get('nolog') else repr(r.get('send'))}"
+                  for r in rules]
+    elif rules is not None:
+        lines.append(f"  answers from {rules}")
+    if spec.get("log"):
+        lines.append(f"  log {spec['log']}")
+    return lines
+
+
+@step_kind("playbook", keys=("limit", "extra", "rules", "log", "timeout", "args", "prompt_idle", "ask_operator"),
+           describe=playbook_describe)
 async def playbook_step(spec, ans, run):
     """A walk's `{playbook: <path>, limit, extra, rules, log, timeout, args, prompt_idle,
     ask_operator}` through the subscriber's `ans` fixture (an Ansible), every rule of Ansible
     included (no empty scope, one controller, forwarded arguments). Its Result is classified by
     the step (`outcomes:`, then the exit code), so a REFUSAL can be the expected outcome."""
-    limit = spec.get("limit")
-    if isinstance(limit, (str, int)):
-        limit = [str(limit)]
-    elif isinstance(limit, list):
-        # ["{live}", cache_hosts]: a resolved list inside the list is spliced in place
-        limit = [str(h) for x in limit for h in (x if isinstance(x, list) else [x])]
+    limit = _step_limit(spec)
     rules = step_rules(spec.get("rules"), run.root)
     logger.info("playbook step %s: limit %s, extra %s, rules %s, log %s", spec["playbook"],
                 limit if limit is not None else "(none: its own hosts)", sorted(spec.get("extra") or {}),

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import string
 import sys
 import time
@@ -119,6 +120,9 @@ class RunContext(Background):
         self.results: list[StepResult] = []
         self.current: StepContext | None = None
         self.last_output = ""        # what the last executed step printed (retry evidence)
+        # --dry-run: the walk is walked, nothing it would change is run (WP §6d). A subscriber's
+        # fixtures and run_start hooks read this and must not change anything when it is true
+        self.dry = False
 
     def nolog(self, value: Any) -> Any:
         """Mark a value NOLOG from here on (e.g. a password an action generated); returns it."""
@@ -165,8 +169,15 @@ class Runner:
     def __init__(self, rc: RunnerConfig, reg: Registry, run_config: RunConfig, store: Store,
                  ui: InputBroker | None = None, echo: TextIO | None = None, color: str = "auto",
                  run_id: str = "", readonly: bool = False, report_formats: tuple[str, ...] = (),
-                 show_commands: bool = False, forwarded: tuple[str, ...] = ()):
+                 show_commands: bool = False, forwarded: tuple[str, ...] = (),
+                 dry: bool = False, dry_outcomes: dict[str, str] | None = None):
         self.forwarded = tuple(forwarded)          # the arguments after `--`, for the steps' tools
+        # --dry-run (WP §6d): walk, judge every guard and transition, run only what LOOKS (read-only
+        # kinds, observers); describe the commands the rest would run; lock, claim, store nothing
+        self.dry = dry
+        self.dry_outcomes = dict(dry_outcomes or {})   # full step id -> the outcome to assume
+        self.dry_not_run: list[str] = []               # python actions a dry run did not run
+        self.dry_unrendered: list[str] = []            # references a dry run could not resolve
         self.show_commands = show_commands         # --show-commands: each command, copy-pasteable
         self.report_formats = report_formats      # empty: no report (only --report asks for one)
         self.run_id = run_id or uuid.uuid4().hex[:8]
@@ -247,6 +258,9 @@ class Runner:
 
     # ── the run ──
     async def run(self, program: Program) -> RunResult:
+        if self.dry:
+            log.info("dry run: no writer lock, no scenario claim, no state or journal written")
+            return await self._run(program)
         if self.readonly:
             log.info("read-only run: no writer lock taken")
             return await self._run(program)
@@ -256,6 +270,9 @@ class Runner:
             return await self._run(program)
 
     def journal(self, event: str, **fields: Any) -> None:
+        if self.dry:
+            log.debug("dry run: journal %s not written", event)
+            return
         self.store.journal.append(event, run=self.run_id, **self.secrets.obj(fields))
 
     async def _run(self, program: Program) -> RunResult:
@@ -264,6 +281,7 @@ class Runner:
         run = RunContext(rc, self.run_config, program, self.store)
         run.secrets = self.secrets
         run.forwarded = self.forwarded
+        run.dry = self.dry
         run_scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui,
                                   "registry": self.reg})
         self._run_ctx, self._run_scope = run, run_scope
@@ -313,7 +331,7 @@ class Runner:
             log.info("run %s ends %s%s; state %s", self.run_id, "PASSED" if result.passed else "FAILED",
                      f" ({result.why})" if result.why else "", run.state)
             rw = rc.release_when
-            if not self.readonly and rw and self.store.get_scenario() is not None:
+            if not self.readonly and not self.dry and rw and self.store.get_scenario() is not None:
                 # judged on what IS, never on the model alone: re-read every observed
                 # variable release_when names; one that cannot be read keeps the scenario
                 blind = await self._reobserve(run, run_scope, "(release)", only=set(rw))
@@ -327,9 +345,12 @@ class Runner:
                     self.store.release_scenario()
                     self.journal("scenario_released", by="release_when", state=run.state)
                     self.say(self.style.dim(f"scenario released: the state reached {rw}"))
-        await self.hook("run_end", run=run, result=result)
+        if self.dry:
+            self._dry_summary(run)
+        else:
+            await self.hook("run_end", run=run, result=result)
         self._summary(result)
-        if self.report_formats:
+        if self.report_formats and not self.dry:
             try:   # a report never changes a run's result
                 for path in report.write(self.store, self.run_id, self.report_formats):
                     self.say(self.style.dim(f"report: {path}"))
@@ -370,7 +391,11 @@ class Runner:
                 sr = await self._step(run, run_scope, step, num, data, program=program, prefix=prefix,
                                       attempt=f"1/{1 + step.retry['times']}" if step.retry else "")
                 attempt = 1
-                while step.retry and not self._aborted:
+                if step.retry and self.dry:
+                    self.say(self.style.dim(f"     (dry) {full} would be retried up to {step.retry['times']} more "
+                                            f"time(s) if: {step.retry['if']}"
+                                            + (f", unless {step.retry['unless']}" if step.retry["unless"] else "")))
+                while step.retry and not self._aborted and not self.dry:
                     again, why = await self._retry_wanted(run, run_scope, step, sr, attempt, num, data,
                                                           program, prefix)
                     if not again:
@@ -576,11 +601,13 @@ class Runner:
             return sr
         self.say("\n" + self.style.banner(f"==== [{index}] {sid}"
                                          + (f" ({act.name})" if act.name != sid else "")
-                                         + (f" attempt {attempt}" if attempt else "") + " ===="))
+                                         + (f" attempt {attempt}" if attempt else "")
+                                         + (" (dry)" if self.dry else "") + " ===="))
         self.journal("step_start", step=sid, action=act.name, params=params,
                      **({"attempt": attempt} if attempt else {}), **({"always": True} if always else {}))
         run.last_output = ""
-        await self.hook("step_start", run=run, step=ctx)
+        if not self.dry:                  # hooks of a step are about RUNNING it
+            await self.hook("step_start", run=run, step=ctx)
         ok, unknown = requires_holds(act.requires, run.state)
         log.info("%s: requires %s against state %s -> %s", sid, act.requires or "{}", run.state,
                  "unknown value(s) " + ", ".join(unknown) if ok and unknown else "holds" if ok else "DOES NOT HOLD")
@@ -605,7 +632,7 @@ class Runner:
                         show_command=(lambda line: self.say(self.style.dim(line))) if self.show_commands else None)
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
-            outcome = await self._execute(act, scope, ctx, step_data)
+            outcome = await self._execute(act, scope, ctx, step_data, program=program, step=step)
             run.last_output = "\n".join(proc.transcript)
             log.info("%s: the action ended %s%s (%.1fs)", sid, outcome.name,
                      f" — {outcome.detail}" if outcome.detail else "", time.monotonic() - started)
@@ -639,6 +666,9 @@ class Runner:
         # only looks (it may produce no state), so there is nothing to re-read after it.
         if act.readonly:
             log.debug("%s: read-only action: reality not re-read after it", sid)
+        elif self.dry:
+            # nothing was changed, so reality would only undo the walk's own model of it
+            log.debug("%s: dry run: reality not re-read (the model carries the walk)", sid)
         else:
             await self._reobserve(run, run_scope, sid)
         if outcome.name == expect.outcome:
@@ -650,7 +680,10 @@ class Runner:
                     f"{k}={want!r} (is {have!r})" for k, (want, have) in wrong.items()))
         else:
             log.info("%s: ended %s, the plan expected %s", sid, outcome.name, expect.outcome)
-        if not self.readonly:
+        if self.dry:
+            if run.state != before:
+                log.info("%s: (dry) the model's state %s -> %s (not stored)", sid, before, run.state)
+        elif not self.readonly:
             if run.state != before:
                 log.info("%s: state %s -> %s (written to the store)", sid, before, run.state)
             self.store.set_state(run.state)
@@ -660,7 +693,8 @@ class Runner:
         run.results.append(sr)
         run.current = None
         # step_end hooks run BEFORE the journal line, so the metrics they record land in it
-        await self.hook("step_end", run=run, step=ctx, result=sr)
+        if not self.dry:
+            await self.hook("step_end", run=run, step=ctx, result=sr)
         self.journal("step_end", step=sid, action=act.name, outcome=outcome.name,
                      detail=outcome.detail, seconds=round(sr.seconds, 1), state=run.state,
                      metrics=ctx.metrics, **({"attempt": attempt} if attempt else {}))
@@ -671,8 +705,11 @@ class Runner:
         self.say(self.style.ok(line) if as_expected else self.style.bad(line))
         return sr
 
-    async def _execute(self, act: ActionSpec, scope: Scope, ctx: StepContext, step_data: dict) -> Outcome:
+    async def _execute(self, act: ActionSpec, scope: Scope, ctx: StepContext, step_data: dict,
+                       program: Program | None = None, step: Step | None = None) -> Outcome:
         async def body() -> Any:
+            if self.dry:
+                return await self._dry_body(act, scope, ctx, step_data, program, step)
             return await self._body(act, scope, ctx, step_data)
 
         # a walk action's inner steps set their own current task: put this one back after them
@@ -794,8 +831,17 @@ class Runner:
                 return facts[name]
             if name in self.reg.resolvers:
                 fn, source = self.reg.resolvers[name]
-                kwargs = await self.fixtures.kwargs_for(fn, Scope("resolve", {"arg": arg}, parent=scope))
-                value = await call(fn, kwargs)
+                try:
+                    kwargs = await self.fixtures.kwargs_for(fn, Scope("resolve", {"arg": arg}, parent=scope))
+                    value = await call(fn, kwargs)
+                except Exception as e:  # noqa: BLE001 — a dry run shows what it cannot resolve (T-D16)
+                    if not self.dry:
+                        raise
+                    marker = "{" + name + (f":{arg}" if arg else "") + "}"
+                    why = e.outcome.detail if isinstance(e, OutcomeError) else f"{type(e).__name__}: {e}"
+                    log.info("%s: (dry) %s cannot be resolved (%s) -> shown unrendered", ctx.id, marker, why)
+                    self.dry_unrendered.append(f"{ctx.id}: {marker} — {why}")
+                    return marker
                 log.info("%s: {%s%s} -> %r (resolver %s)", ctx.id, name, f":{arg}" if arg else "", value, source)
                 return value
             raise template.TemplateError(f"{{{name}}}: no such reference")
@@ -868,6 +914,87 @@ class Runner:
             return Outcome(FAILED, "timed out")
         log.info("%s: exit %d -> %s", ctx.id, r.returncode, PASSED if r.returncode == 0 else FAILED)
         return Outcome(PASSED) if r.returncode == 0 else Outcome(FAILED, f"exit {r.returncode}")
+
+    # ── --dry-run (WP §6d) ──
+    def _dry_expected(self, program: Program | None, step: Step | None) -> str:
+        return program.expected(step.id).outcome if program is not None and step is not None else PASSED
+
+    async def _dry_body(self, act: ActionSpec, scope: Scope, ctx: StepContext, step_data: dict,
+                        program: Program | None, step: Step | None) -> Any:
+        """The dry counterpart of _body: walks recurse, read-only kinds and `refuse` RUN, command
+        kinds DESCRIBE their command, python actions run only their `dry=` describer; everything
+        else ends with the outcome it is expected to end with (or --dry-outcome's)."""
+        expected = self._dry_expected(program, step)
+        if ctx.id in self.dry_outcomes:
+            o = self.dry_outcomes[ctx.id]
+            log.info("%s: (dry) assumed outcome %s (--dry-outcome)", ctx.id, o)
+            self.say(self.style.dim(f"     (dry) {ctx.id}: assumed {o} (--dry-outcome)"))
+            return Outcome(o, "assumed by --dry-outcome")
+        if act.kind == "walk":
+            return await self._run_walk(act, scope, ctx, step_data)
+        if act.kind == "call":
+            target = self.reg.actions[act.call]
+            with_ = await template.render(act.call_with, self._resolver(scope, ctx))
+            params = deep_merge(ctx.params, with_)
+            log.info("%s: (dry) calls %s [%s] with %s", ctx.id, target.name, target.kind, with_ or "{}")
+            ctx.params = params
+            scope.values["params"] = params
+            return await self._dry_body(target, scope, ctx, deep_merge(step_data, {self.rc.params_section: params}),
+                                        program, step)
+        if act.kind == "cmd":
+            kind = act.inner["kind"]
+            if kind == "refuse" or act.readonly:
+                log.info("%s: (dry) a %s step RUNS: it only looks", ctx.id, kind)
+                return await self._cmd(act, scope, ctx)
+            spec = await template.render(act.inner["spec"], self._resolver(scope, ctx))
+            for line in await self._describe(kind, spec, scope, ctx):
+                # a describer line that starts with spaces is DETAIL of the command above it
+                self.say(self.style.dim(f"     (dry)   {line.strip()}" if line.startswith(" ")
+                                        else f"     (dry) would run: {line}"))
+            return Outcome(expected, "dry run: described, not run")
+        if act.kind == "shell":
+            spec = act.shell or {}
+            fmt, run_ = _Format(ctx.params), spec["run"]
+            argv = [fmt(w) for w in run_] if isinstance(run_, list) else ["bash", "-c", fmt(run_)]
+            self.say(self.style.dim(f"     (dry) would run: {shlex.join(argv)}"))
+            return Outcome(expected, "dry run: described, not run")
+        if act.dry is not None:
+            kwargs = await self.fixtures.kwargs_for(act.dry, scope)
+            log.debug("%s: (dry) calling the describer %s(%s)", ctx.id, _fn_name(act.dry), ", ".join(kwargs))
+            value = await call(act.dry, kwargs)
+            if isinstance(value, (list, tuple)):
+                for line in value:
+                    self.say(self.style.dim(f"     (dry) would: {line}"))
+                return Outcome(expected, "dry run: described, not run")
+            return Outcome(expected, "dry run: described, not run") if value is None else value
+        self.dry_not_run.append(ctx.id)
+        log.info("%s: (dry) python action %s not run: assumed %s", ctx.id, act.name, expected)
+        self.say(self.style.dim(f"     (dry) python action {act.name} (not run): assumed {expected}"))
+        return Outcome(expected, "dry run: python action not run")
+
+    async def _describe(self, kind: str, spec: dict, scope: Scope, ctx: StepContext) -> list[str]:
+        """The command(s) a step of `kind` would run, as lines — built, never started."""
+        if kind == "run":
+            run_ = spec["run"]
+            argv = [str(w) for w in run_] if isinstance(run_, list) else ["bash", "-c", str(run_)]
+            return [shlex.join(argv) + (f"   (in {spec['cwd']})" if spec.get("cwd") else "")]
+        fn = self.reg.describers.get(kind)
+        if fn is None:
+            log.info("%s: (dry) kind %s has no describer: its rendered spec is shown", ctx.id, kind)
+            return [f"{kind}: {json.dumps(spec, default=str)}"]
+        kwargs = await self.fixtures.kwargs_for(fn, Scope("kind", {"spec": spec}, parent=scope))
+        return [str(line) for line in await call(fn, kwargs)]
+
+    def _dry_summary(self, run: RunContext) -> None:
+        self.say("\n" + self.style.banner("==== DRY RUN: nothing was run, locked or stored ===="))
+        if self.dry_not_run:
+            self.say(f"  not run (python actions without a dry= describer; assumed their expected outcome): "
+                     f"{', '.join(self.dry_not_run)}")
+        if self.dry_unrendered:
+            self.say("  shown unrendered (needs the rig, or what it reads, to exist):")
+            for u in self.dry_unrendered:
+                self.say(f"    {u}")
+        self.say(f"  the model's state at the end: {run.state}")
 
     async def _shell(self, act: ActionSpec, scope: Scope, ctx: StepContext) -> Outcome:
         spec = act.shell or {}

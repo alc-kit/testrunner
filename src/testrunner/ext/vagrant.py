@@ -88,7 +88,20 @@ class Vagrant:
         return await self._run(*args, log=log, echo=echo)
 
 
-@step_kind("vagrant", keys=("machines", "provider", "parallel", "log"))
+def vagrant_describe(spec):
+    """--dry-run: the vagrant command vagrant_step would run."""
+    verb, machines = spec["vagrant"], spec.get("machines")
+    names = [machines] if isinstance(machines, str) and machines != "all" else machines
+    if verb == "up":
+        flags = ([] if spec.get("parallel", True) else ["--no-parallel"]) + (
+            [f"--provider={spec['provider']}"] if spec.get("provider") else [])
+        return [" ".join(["vagrant", "up", *flags, *(names or ["<no machine named: refused>"])])]
+    if verb == "destroy":
+        return [" ".join(["vagrant", "destroy", "-f", *([] if names == "all" else (names or ["<name the machines>"]))])]
+    return [f"vagrant {verb}: not up or destroy (refused when run)"]
+
+
+@step_kind("vagrant", keys=("machines", "provider", "parallel", "log"), describe=vagrant_describe)
 async def vagrant_step(spec, vg):
     """A walk's `{vagrant: up|destroy, machines: [...], provider, parallel, log}` through the
     subscriber's `vg` fixture. `up` refuses an empty machine list (vagrant would bring up EVERY

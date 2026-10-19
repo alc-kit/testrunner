@@ -48,6 +48,7 @@ class ActionSpec:
     call_with: dict = field(default_factory=dict)   # call: its `with:`, rendered at run time
     own_effects: bool = False       # call: the step declares produces/produces_on of its own
     inner: dict | None = None       # cmd: {kind, spec, classify}
+    dry: Callable | None = None     # python: --dry-run describer (@action(dry=...))
 
     @property
     def all_outcomes(self) -> frozenset[str]:
@@ -72,6 +73,7 @@ class Registry:
     step_kinds: dict[str, tuple[Callable, tuple[str, ...], str]] = field(default_factory=dict)
     resolvers: dict[str, tuple[Callable, str]] = field(default_factory=dict)
     readonly_kinds: set[str] = field(default_factory=set)       # kinds whose steps only look
+    describers: dict[str, Callable] = field(default_factory=dict)  # kind -> --dry-run describer
 
 
 def _module_files(entry: Path) -> list[Path]:
@@ -165,7 +167,7 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
         reg.actions[mark.name] = ActionSpec(
             name=mark.name, kind="python", requires=mark.requires, produces=mark.produces,
             produces_on=mark.produces_on, outcomes=mark.outcomes, tags=mark.tags,
-            doc=mark.doc, readonly=mark.readonly, nolog=mark.nolog, fn=obj, source=where)
+            doc=mark.doc, readonly=mark.readonly, nolog=mark.nolog, fn=obj, source=where, dry=mark.dry)
     elif isinstance(mark, FixtureMark):
         if mark.name in reg.fixtures:
             raise ConfigError(f"fixture {mark.name!r} exported twice: {reg.fixtures[mark.name].source} and {where}")
@@ -180,6 +182,8 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
         reg.step_kinds[mark.name] = (obj, mark.keys, where)
         if mark.readonly:
             reg.readonly_kinds.add(mark.name)
+        if mark.describe is not None:
+            reg.describers[mark.name] = mark.describe
     elif isinstance(mark, ResolverMark):
         if mark.name in reg.resolvers:
             raise ConfigError(f"resolver {mark.name!r} exported twice: {reg.resolvers[mark.name][1]} and {where}")
