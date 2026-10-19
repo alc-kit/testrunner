@@ -53,6 +53,16 @@ class StepResult:
 
 
 @dataclass
+class WalkEnd:
+    """How one walk ended: the run's plan, or a walk action's inner steps (then `outcome` and
+    `detail` are what the action itself ends with)."""
+    passed: bool
+    why: str = ""
+    outcome: str = PASSED
+    detail: str = ""
+
+
+@dataclass
 class RunResult:
     passed: bool
     steps: list[StepResult]
@@ -118,9 +128,10 @@ class RunContext(Background):
 class StepContext(Background):
     """The `step` fixture."""
 
-    def __init__(self, step: Step, action: ActionSpec, index: int, log_dir: Path, params: dict):
-        super().__init__(step.id)
-        self.id, self.action, self.index = step.id, action.name, index
+    def __init__(self, step: Step, action: ActionSpec, index: int | str, log_dir: Path, params: dict,
+                 sid: str | None = None):
+        super().__init__(sid or step.id)
+        self.id, self.action, self.index = sid or step.id, action.name, index
         self.spec, self.log_dir, self.params = step, log_dir, params
         self.started = time.monotonic()
         self.metrics: dict[str, Any] = {}
@@ -240,7 +251,6 @@ class Runner:
         self.ui.attach()
         self.ui.command("status", self._cmd_status(run))
         self.ui.command("abort", self._cmd_abort)
-        walker = Walker(program)
         state = {var: spec.get("initial") for var, spec in rc.states.items()}
         stored = self.store.get_state()
         state.update({k: v for k, v in stored.items() if k in state})
@@ -270,63 +280,8 @@ class Runner:
                 result.passed, result.why = False, f"refused before the first step: {e.outcome.detail or e}"
                 self.say(self.style.bad(f"refused before the first step: {e.outcome.detail or e}"))
                 return result
-            cur = walker.start()
-            visits: dict[str, int] = {}
-            index = 0
-            while cur is not None:
-                step = walker.current(cur)
-                index += 1
-                visits[step.id] = visits.get(step.id, 0) + 1
-                log.debug("cursor %s -> step %s (action %s), visit %d of max %d", _cursor(cur), step.id,
-                          step.action, visits[step.id], step.max_visits)
-                if visits[step.id] > step.max_visits:
-                    sr = StepResult(step.id, step.action, ERRORED,
-                                    f"visited more than max_visits={step.max_visits} times")
-                    log.error("%s: %s — the run stops", step.id, sr.detail)
-                    run.results.append(sr)
-                    result.passed, result.why = False, sr.detail
-                    break
-                token = STEP.set(step.id)
-                try:
-                    sr = await self._step(run, run_scope, step, index, data,
-                                          attempt=f"1/{1 + step.retry['times']}" if step.retry else "")
-                    attempt = 1
-                    while step.retry and not self._aborted:
-                        again, why = await self._retry_wanted(run, run_scope, step, sr, attempt, index, data)
-                        if not again:
-                            if why:
-                                log.info("%s: %s", step.id, why)
-                                self.journal("step_no_retry", step=step.id, attempt=attempt, why=why)
-                                self.say(self.style.dim(f"     {why}"))
-                            break
-                        attempt += 1
-                        total = 1 + step.retry["times"]
-                        log.info("%s: %s", step.id, why)
-                        self.journal("step_retry", step=step.id, attempt=attempt, of=total, why=why,
-                                     delay=step.retry["delay"])
-                        self.say(self.style.warn(f"     {why}"
-                                                 + (f"; in {step.retry['delay']:g}s" if step.retry["delay"] else "")))
-                        if step.retry["delay"]:
-                            await asyncio.sleep(step.retry["delay"])
-                        sr = await self._step(run, run_scope, step, index, data, attempt=f"{attempt}/{total}")
-                finally:
-                    STEP.reset(token)
-                if self._aborted:
-                    log.warning("aborted by the operator after %s", step.id)
-                    result.passed, result.why = False, "aborted by the operator"
-                    break
-                t = walker.next(cur, sr.outcome, run.state)
-                sr.verdict = t.verdict
-                log.info("after %s ended %s: verdict %s%s; next %s", step.id, sr.outcome, t.verdict,
-                         f" ({t.why})" if t.why else "",
-                         walker.current(t.cursor).id if t.cursor is not None else "(end of run)")
-                if t.verdict == "failed":
-                    result.passed, result.why = False, t.why
-                elif t.verdict == "diverted":
-                    self.say(f"     {t.why}")
-                elif t.why:                       # a routing decision on the expected outcome (a rule, a goto)
-                    self.say(self.style.dim(f"     {t.why}"))
-                cur = t.cursor
+            end = await self._walk(run, run_scope, program, data)
+            result.passed, result.why = end.passed, end.why
         finally:
             problems = await run.finish()
             log.debug("closing the run scope (run fixtures tear down in reverse order)")
@@ -362,6 +317,76 @@ class Runner:
             except Exception as e:  # noqa: BLE001
                 self.say(self.style.warn(f"no report: {e}"))
         return result
+
+    async def _walk(self, run: RunContext, run_scope: Scope, program: Program, data: dict,
+                    prefix: str = "", label: str = "") -> WalkEnd:
+        """Walk one program to its end: the run's plan, or (prefix "<step>/") a walk action's
+        inner steps. Step ids in a program are LOCAL; what people and the journal see is
+        prefix + id, so a walk inside a walk reads `addnode/install/install`."""
+        walker = Walker(program)
+        cur = walker.start()
+        visits: dict[str, int] = {}
+        index = 0
+        end = WalkEnd(True)
+        while cur is not None:
+            step = walker.current(cur)
+            index += 1
+            num = f"{label}{index}"
+            full = prefix + step.id
+            visits[step.id] = visits.get(step.id, 0) + 1
+            log.debug("cursor %s -> step %s (action %s), visit %d of max %d", _cursor(cur), full,
+                      step.action, visits[step.id], step.max_visits)
+            if visits[step.id] > step.max_visits:
+                sr = StepResult(full, step.action, ERRORED,
+                                f"visited more than max_visits={step.max_visits} times")
+                log.error("%s: %s — the %s stops", full, sr.detail, "walk" if prefix else "run")
+                run.results.append(sr)
+                return WalkEnd(False, sr.detail, ERRORED, f"{full}: {sr.detail}")
+            token = STEP.set(full)
+            try:
+                sr = await self._step(run, run_scope, step, num, data, program=program, prefix=prefix,
+                                      attempt=f"1/{1 + step.retry['times']}" if step.retry else "")
+                attempt = 1
+                while step.retry and not self._aborted:
+                    again, why = await self._retry_wanted(run, run_scope, step, sr, attempt, num, data,
+                                                          program, prefix)
+                    if not again:
+                        if why:
+                            log.info("%s: %s", full, why)
+                            self.journal("step_no_retry", step=full, attempt=attempt, why=why)
+                            self.say(self.style.dim(f"     {why}"))
+                        break
+                    attempt += 1
+                    total = 1 + step.retry["times"]
+                    log.info("%s: %s", full, why)
+                    self.journal("step_retry", step=full, attempt=attempt, of=total, why=why,
+                                 delay=step.retry["delay"])
+                    self.say(self.style.warn(f"     {why}"
+                                             + (f"; in {step.retry['delay']:g}s" if step.retry["delay"] else "")))
+                    if step.retry["delay"]:
+                        await asyncio.sleep(step.retry["delay"])
+                    sr = await self._step(run, run_scope, step, num, data, program=program, prefix=prefix,
+                                          attempt=f"{attempt}/{total}")
+            finally:
+                STEP.reset(token)
+            if self._aborted:
+                log.warning("aborted by the operator after %s", full)
+                return WalkEnd(False, "aborted by the operator", ABORTED, "aborted by the operator")
+            t = walker.next(cur, sr.outcome, run.state)
+            sr.verdict = t.verdict
+            log.info("after %s ended %s: verdict %s%s; next %s", full, sr.outcome, t.verdict,
+                     f" ({t.why})" if t.why else "",
+                     prefix + walker.current(t.cursor).id if t.cursor is not None
+                     else "(end of walk)" if prefix else "(end of run)")
+            if t.verdict == "failed":
+                end = WalkEnd(False, t.why, sr.outcome, f"{full}: {sr.outcome}"
+                              + (f" — {sr.detail}" if sr.detail else ""))
+            elif t.verdict == "diverted":
+                self.say(f"     {t.why}")
+            elif t.why:                       # a routing decision on the expected outcome (a rule, a goto)
+                self.say(self.style.dim(f"     {t.why}"))
+            cur = t.cursor
+        return end
 
     async def _reobserve(self, run: RunContext, scope: Scope, where: str,
                          only: set[str] | None = None) -> set[str]:
@@ -402,11 +427,11 @@ class Runner:
         return value
 
     async def _retry_wanted(self, run: RunContext, run_scope: Scope, step: Step, sr: StepResult, attempt: int,
-                            index: int, data: dict) -> tuple[bool, str]:
+                            index: str, data: dict, program: Program, prefix: str = "") -> tuple[bool, str]:
         """(retry?, why): the retry spec's evidence, judged on the attempt that just ended."""
         spec = step.retry
         total = 1 + spec["times"]
-        if sr.outcome == SKIPPED or sr.outcome == run.program.expected(step.id).outcome:
+        if sr.outcome == SKIPPED or sr.outcome == program.expected(step.id).outcome:
             return False, ""                    # skipped by `when`, or it ended as the plan expected
         if sr.outcome == ABORTED:
             return False, f"no retry: attempt {attempt}/{total} was aborted by the operator"
@@ -432,7 +457,7 @@ class Runner:
                     hit, txt = not bad, f"observed state {'is' if not bad else 'is not'} {want}" + (f" ({bad})" if bad else "")
                 else:
                     probe = Step(f"{step.id}~probe{attempt}{'' if part == 'if' else '-unless'}", want)
-                    psr = await self._step(run, run_scope, probe, index, data)
+                    psr = await self._step(run, run_scope, probe, index, data, program=program, prefix=prefix)
                     hit, txt = psr.outcome == PASSED, f"probe {want} {psr.outcome}"
                 seen.append(txt)
                 if part == "if" and not hit:
@@ -449,43 +474,45 @@ class Runner:
             return False, f"no retry after attempt {attempt}/{total}: unless {why_unless[-1]}"
         return True, f"retry {attempt + 1}/{total}: {'; '.join(why_if)}"
 
-    async def _step(self, run: RunContext, run_scope: Scope, step: Step, index: int, data: dict,
-                    attempt: str = "") -> StepResult:
+    async def _step(self, run: RunContext, run_scope: Scope, step: Step, index: int | str, data: dict,
+                    attempt: str = "", program: Program | None = None, prefix: str = "") -> StepResult:
         rc = self.rc
+        program = program or run.program
         act = self.reg.actions[step.action]
+        sid = prefix + step.id            # the id people and the journal see; step.id is local to `program`
         params = deep_merge(data.get(rc.params_section) or {}, step.with_)
         step_data = deep_merge(data, {rc.params_section: params})
         log_dir = self.store.path("logs", "x").parent
-        ctx = StepContext(step, act, index, log_dir, params)
+        ctx = StepContext(step, act, index, log_dir, params, sid)
         run.current = ctx
         started = time.monotonic()
-        log.info("step %s (#%d): action %s [%s, from %s]; with %s", step.id, index, act.name, act.kind,
+        log.info("step %s (#%s): action %s [%s, from %s]; with %s", sid, index, act.name, act.kind,
                  act.source, step.with_ or "{}")
-        log.debug("%s: params %s", step.id, params)
+        log.debug("%s: params %s", sid, params)
         if step.when:
-            log.info("%s: when — %s", step.id, "; ".join(when_explained(step.when, step_data)))
+            log.info("%s: when — %s", sid, "; ".join(when_explained(step.when, step_data)))
             absent = [k for k in step.when if lookup(step_data, k, _ABSENT) is _ABSENT]
             if absent:
                 # a typo here skips the step forever while the run passes: say so loudly
                 log.warning("%s: when names %s, which the run config does not contain at all — compared "
-                            "as None (a typo, or a key the config never sets?)", step.id, absent)
+                            "as None (a typo, or a key the config never sets?)", sid, absent)
         if not when_holds(step.when, step_data):
-            log.info("%s: skipped — when does not hold", step.id)
-            sr = StepResult(step.id, act.name, SKIPPED, "when: does not hold", state=dict(run.state))
-            self.say(self.style.dim(f"---- {step.id}: skipped (when)"))
-            self.journal("step_skip", step=step.id, action=act.name, why="when")
+            log.info("%s: skipped — when does not hold", sid)
+            sr = StepResult(sid, act.name, SKIPPED, "when: does not hold", state=dict(run.state))
+            self.say(self.style.dim(f"---- {sid}: skipped (when)"))
+            self.journal("step_skip", step=sid, action=act.name, why="when")
             run.results.append(sr)
             run.current = None
             return sr
-        self.say("\n" + self.style.banner(f"==== [{index}] {step.id}"
-                                         + (f" ({act.name})" if act.name != step.id else "")
+        self.say("\n" + self.style.banner(f"==== [{index}] {sid}"
+                                         + (f" ({act.name})" if act.name != sid else "")
                                          + (f" attempt {attempt}" if attempt else "") + " ===="))
-        self.journal("step_start", step=step.id, action=act.name, params=params,
+        self.journal("step_start", step=sid, action=act.name, params=params,
                      **({"attempt": attempt} if attempt else {}))
         run.last_output = ""
         await self.hook("step_start", run=run, step=ctx)
         ok, unknown = requires_holds(act.requires, run.state)
-        log.info("%s: requires %s against state %s -> %s", step.id, act.requires or "{}", run.state,
+        log.info("%s: requires %s against state %s -> %s", sid, act.requires or "{}", run.state,
                  "unknown value(s) " + ", ".join(unknown) if ok and unknown else "holds" if ok else "DOES NOT HOLD")
         if ok and unknown:
             # Static validation may only warn about an unknown value; running on one would
@@ -497,7 +524,7 @@ class Runner:
                               f"{ {k: run.state.get(k) for k in act.requires} }")
         else:
             proc = Proc(rc.root, log_dir, self.ui, self.echo,
-                        env={"TR_STEP": step.id, "TR_ACTION": act.name, "TR_RUN_ID": self.run_id,
+                        env={"TR_STEP": sid, "TR_ACTION": act.name, "TR_RUN_ID": self.run_id,
                              "TR_STATE_DIR": str(self.store.root), "TR_PARAMS": json.dumps(params),
                              "TR_CONFIG_FILE": str(self.run_config.file or ""),
                              "TR_WITH": json.dumps(deep_merge(run.program.params, step.with_)),
@@ -510,66 +537,66 @@ class Runner:
                                    "state": StateView(run.state)}, parent=run_scope)
             outcome = await self._execute(act, scope, ctx, step_data)
             run.last_output = "\n".join(proc.transcript)
-            log.info("%s: the action ended %s%s (%.1fs)", step.id, outcome.name,
+            log.info("%s: the action ended %s%s (%.1fs)", sid, outcome.name,
                      f" — {outcome.detail}" if outcome.detail else "", time.monotonic() - started)
             problems = await ctx.finish()
             try:
-                log.debug("%s: closing the step scope (step fixtures tear down in reverse order)", step.id)
+                log.debug("%s: closing the step scope (step fixtures tear down in reverse order)", sid)
                 await scope.close()
             except Exception as e:  # noqa: BLE001
-                log.error("%s: fixture teardown failed: %s", step.id, e, exc_info=True)
+                log.error("%s: fixture teardown failed: %s", sid, e, exc_info=True)
                 problems.append(f"fixture teardown failed: {e}")
             if problems and outcome.name == PASSED:
-                log.warning("%s: passed, but %s -> failed", step.id, "; ".join(problems))
+                log.warning("%s: passed, but %s -> failed", sid, "; ".join(problems))
                 outcome = Outcome(FAILED, "; ".join(problems))
         if outcome.name not in act.all_outcomes:
-            log.error("%s: outcome %r is not declared by %s (declares %s) -> errored", step.id, outcome.name,
+            log.error("%s: outcome %r is not declared by %s (declares %s) -> errored", sid, outcome.name,
                       act.name, sorted(act.all_outcomes))
             outcome = Outcome(ERRORED, f"returned undeclared outcome {outcome.name!r} ({outcome.detail})")
         # state: what the outcome produces, then what reality says
         before = dict(run.state)
         changed = produced(act, outcome.name, run.state) if outcome.name not in (ERRORED, ABORTED) else {}
         run.state.update(changed)
-        log.info("%s: outcome %s produces %s (%s) -> state %s", step.id, outcome.name, changed or "nothing",
+        log.info("%s: outcome %s produces %s (%s) -> state %s", sid, outcome.name, changed or "nothing",
                  "errored/aborted produce nothing" if outcome.name in (ERRORED, ABORTED)
                  else f"declared: {act.produces if outcome.name == PASSED else act.produces_on.get(outcome.name, {})}",
                  run.state)
-        expect = run.program.expected(step.id)
+        expect = program.expected(step.id)
         # Reality after EVERY step, whatever its outcome: a step that failed (or was
         # aborted) half-way can still have changed the system — measured 2026-10-11: an
         # `up` that built every VM and then failed left the model at `absent`, and
         # release_when then released the scenario over running VMs. A read-only action
         # only looks (it may produce no state), so there is nothing to re-read after it.
         if act.readonly:
-            log.debug("%s: read-only action: reality not re-read after it", step.id)
+            log.debug("%s: read-only action: reality not re-read after it", sid)
         else:
-            await self._reobserve(run, run_scope, step.id)
+            await self._reobserve(run, run_scope, sid)
         if outcome.name == expect.outcome:
             wrong = {k: (v, run.state.get(k)) for k, v in expect.state.items() if run.state.get(k) != v}
-            log.debug("%s: expected outcome %s reached; expect.state %s -> %s", step.id, expect.outcome,
+            log.debug("%s: expected outcome %s reached; expect.state %s -> %s", sid, expect.outcome,
                       expect.state or "{}", f"wrong {wrong}" if wrong else "ok")
             if wrong:
                 outcome = Outcome(FAILED, "expected state not reached: " + ", ".join(
                     f"{k}={want!r} (is {have!r})" for k, (want, have) in wrong.items()))
         else:
-            log.info("%s: ended %s, the plan expected %s", step.id, outcome.name, expect.outcome)
+            log.info("%s: ended %s, the plan expected %s", sid, outcome.name, expect.outcome)
         if not self.readonly:
             if run.state != before:
-                log.info("%s: state %s -> %s (written to the store)", step.id, before, run.state)
+                log.info("%s: state %s -> %s (written to the store)", sid, before, run.state)
             self.store.set_state(run.state)
         outcome = Outcome(outcome.name, self.secrets.text(outcome.detail))
-        sr = StepResult(step.id, act.name, outcome.name, outcome.detail,
+        sr = StepResult(sid, act.name, outcome.name, outcome.detail,
                         seconds=time.monotonic() - started, state=dict(run.state))
         run.results.append(sr)
         run.current = None
         # step_end hooks run BEFORE the journal line, so the metrics they record land in it
         await self.hook("step_end", run=run, step=ctx, result=sr)
-        self.journal("step_end", step=step.id, action=act.name, outcome=outcome.name,
+        self.journal("step_end", step=sid, action=act.name, outcome=outcome.name,
                      detail=outcome.detail, seconds=round(sr.seconds, 1), state=run.state,
                      metrics=ctx.metrics, **({"attempt": attempt} if attempt else {}))
         as_expected = outcome.name == expect.outcome
         mark = "" if as_expected else f"  (expected {expect.outcome})"
-        line = (f"---- {step.id}{f' attempt {attempt}' if attempt else ''}: {outcome.name}{mark} ({sr.seconds:.1f}s)"
+        line = (f"---- {sid}{f' attempt {attempt}' if attempt else ''}: {outcome.name}{mark} ({sr.seconds:.1f}s)"
                 + (f" — {outcome.detail}" if outcome.detail else ""))
         self.say(self.style.ok(line) if as_expected else self.style.bad(line))
         return sr
