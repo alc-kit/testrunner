@@ -18,7 +18,8 @@
 #   (c) a Vagrantfile of its own that never requires this file; or
 #   (d) no Vagrantfile and no vagrant at all (ext.rig's machine-provider seam).
 #
-# What it builds, from the node catalogue (`bin/rig-nodes json`, the ONE reader) and the
+# What it builds, from the node catalogue (`bin/rig-nodes json [catalogue_args]`, the ONE
+# reader; catalogue_args: ["--scenario", s] picks one shape of a rig) and the
 # rig's environment (<PREFIX>_*, the prefix in testrunner.yml `ext.rig.prefix`):
 #   * every catalogue machine (order kept: `vagrant up --no-parallel` follows it); sizes
 #     from the catalogue, each `overrides: {field: key}` replaced by <PREFIX>_<KEY> when > 0;
@@ -56,7 +57,7 @@ module RigVagrant
 
     def initialize(root:, name: nil, prefix: nil, cache_prefix: nil, label: nil, network: nil,
                    box: "debian/trixie64", root_password: "vagrantlab", cache_port: 3128,
-                   squid_conf: "provision/squid.conf")
+                   squid_conf: "provision/squid.conf", catalogue_args: [])
       @root = root
       ext = ext_rig_settings
       @name = name || ext["name"] || File.basename(root)
@@ -66,6 +67,7 @@ module RigVagrant
       @label = label || @name
       @network, @box, @root_password, @cache_port = network, box, root_password, cache_port
       @squid_conf_path = File.join(root, squid_conf)
+      @catalogue_args = catalogue_args          # e.g. ["--scenario", name]: one shape of the rig
       @hooks = { networks: nil, machines: nil, autostart: nil, domain: nil }
       @provision = Hash.new { |h, k| h[k] = [] }
     end
@@ -146,7 +148,7 @@ module RigVagrant
     end
 
     def catalogue
-      @catalogue ||= JSON.parse(rig_nodes("json")).fetch("machines").freeze
+      @catalogue ||= JSON.parse(rig_nodes("json", *@catalogue_args)).fetch("machines").freeze
     end
 
     # name => { kind, ip, mem, cpu, disks, size, late, optional, machine }, in catalogue order;

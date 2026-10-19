@@ -33,7 +33,11 @@ def rig(tmp_path):
     root = tmp_path / "toy"
     (root / "bin").mkdir(parents=True)
     rn = root / "bin" / "rig-nodes"
-    rn.write_text(f"#!/usr/bin/env python3\nprint({json.dumps(json.dumps(CATALOGUE))})\n")
+    # `json --scenario small` drops node-2 (a rig shape); anything else is the whole catalogue
+    small = {"machines": [m for m in CATALOGUE["machines"] if m["name"] != "node-2"]}
+    rn.write_text("#!/usr/bin/env python3\nimport sys\n"
+                  f"print({json.dumps(json.dumps(small))} if sys.argv[1:] == ['json', '--scenario', 'small'] "
+                  f"else {json.dumps(json.dumps(CATALOGUE))})\n")
     rn.chmod(rn.stat().st_mode | stat.S_IEXEC)
     (root / "secrets").mkdir()
     (root / "secrets" / "harness_key.pub").write_text("ssh-ed25519 AAAAtest toy\n")
@@ -186,3 +190,12 @@ def test_control_a_library_mutation_changes_the_record(rig, old, new, what):
     lib.write_text(text.replace(old, new))
     r, after = record(rig, env={"TOY_NODE_MEM": "3072"})
     assert r.returncode == 0 and after != before, what
+
+
+def test_catalogue_args_pick_a_shape_of_the_rig(rig):
+    vf = DEFAULT.replace('network: "toy-net")', 'network: "toy-net", catalogue_args: ["--scenario", "small"])')
+    r, log = record(rig, vf)
+    assert r.returncode == 0, r.stderr
+    assert [d[0] for d in defined(log)] == ["cache", "node-1"]
+    r, log = record(rig)                                                    # control: no args, the whole table
+    assert [d[0] for d in defined(log)] == ["cache", "node-1", "node-2"]
