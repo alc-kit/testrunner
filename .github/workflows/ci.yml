@@ -17,6 +17,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: pip install pyyaml==6.0.3 pytest==9.1.1
+      # the Vagrant layer's tests load Vagrantfiles with ruby; a runner without one must FAIL
+      # here, never skip them silently
+      - run: ruby --version
       - run: python -m pytest -q tests
   content-guard:
     runs-on: ubuntu-latest
