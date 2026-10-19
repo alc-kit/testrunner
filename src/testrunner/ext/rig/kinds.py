@@ -10,7 +10,11 @@
     mode: "{config:GUEST_EGRESS|none}"      a rig variable (PREFIX_NAME) as this step resolves it;
                                             unset without a `|default` is refused, by name
 
-and one inner-step kind:
+and two inner-step kinds:
+
+    - {machines: up, names: ["{param.node}"], provider: libvirt, parallel: false, log: up.log}
+                                            create / destroy machines through the rig's provider
+                                            (Rig.machines(): vagrant, or the rig's own)
 
     - {require_nodes: ["{param.victim}"]}   refuse unless every named node EXISTS in the rig
                                             (a stage hard-wired to a node; ansible would skip a
@@ -110,3 +114,27 @@ async def require_nodes(spec, rig, vg, params, step):
     stage = step.parent or step.id
     log.info("%s needs %s to exist", stage, nodes)
     await rig.require_nodes(vg, stage, *nodes, subset=rig.e("NODES", params))
+
+
+@step_kind("machines", keys=("names", "provider", "parallel", "log"))
+async def machines_step(spec, rig, proc, params):
+    """`{machines: up|destroy, names: [...]}` through Rig.machines() — vagrant by default, the
+    rig's own provider otherwise. `up` refuses no names (vagrant would create every machine);
+    `destroy` needs names, or `names: all`."""
+    verb, names = spec["machines"], spec.get("names")
+    if isinstance(names, str) and names != "all":
+        names = [names]
+    provider = rig.machines(proc, params)
+    log.info("machines step: %s %s through %s", verb, names, type(provider).__name__)
+    if verb == "up":
+        if not names:
+            raise OutcomeError(FAILED, "machines up: no machine named")
+        kw = {k: spec[k] for k in ("provider", "log") if k in spec}
+        if "parallel" in spec:
+            kw["parallel"] = bool(spec["parallel"])
+        return await provider.up(list(names), **kw)
+    if verb == "destroy":
+        if not names:
+            raise OutcomeError(FAILED, "machines destroy: name the machines, or names: all")
+        return await provider.destroy(None if names == "all" else list(names), **({"log": spec["log"]} if "log" in spec else {}))
+    raise OutcomeError(FAILED, f"machines step: {verb!r} is not up or destroy")

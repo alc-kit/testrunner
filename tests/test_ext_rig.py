@@ -373,3 +373,86 @@ def test_the_generated_ansible_cfg_skips_a_pycache_in_the_inventory(rig_root, tm
     assert "h1" in out["generated"] and "__pycache__" not in out["generated"]
     # negative control: the same inventory WITHOUT the setting does warn, so the check above can fail
     assert "Unable to parse" in out["bare"] and "__pycache__" in out["bare"]
+
+
+# ── mode (d): a rig without vagrant — its own machine provider (WP §6c.6) ────────────────────
+
+class FakeProvider:
+    """A provider of the rig's own: no vagrant, no libvirt."""
+    def __init__(self, states):
+        self.states, self.calls = dict(states), []
+
+    async def status(self):
+        self.calls.append(("status",))
+        return dict(self.states)
+
+    async def up(self, machines, **kw):
+        self.calls.append(("up", tuple(machines), tuple(sorted(kw))))
+        self.states.update({m: "running" for m in machines})
+
+    async def destroy(self, machines=None, **kw):
+        self.calls.append(("destroy", machines))
+        for m in machines or list(self.states):
+            self.states[m] = "not_created"
+
+
+def no_vagrant(tmp_path, monkeypatch):
+    """A `vagrant` that FAILS loudly: a test that passes with it did not need vagrant."""
+    bindir = tmp_path / "nobin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "vagrant").write_text("#!/bin/sh\necho 'vagrant was called' >&2\nexit 99\n")
+    (bindir / "vagrant").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+
+def test_a_rig_with_its_own_provider_never_runs_vagrant(rig_root, tmp_path, monkeypatch):
+    from testrunner.ext.machines import MachineProvider
+    from testrunner.proc import Proc
+    no_vagrant(tmp_path, monkeypatch)
+    fake = FakeProvider({"n1": "running", "n2": "running", "n3": "not_created"})
+    assert isinstance(fake, MachineProvider)
+
+    class OwnRig(Rig):
+        def machines(self, proc, params=None):
+            return fake
+    import yaml
+    rig = OwnRig(rig_root, yaml.safe_load(DEFAULT), rig_root / "configs" / "default.yml", "default")
+    p = Proc(tmp_path, tmp_path / "logs")
+    assert asyncio.run(rig.live_nodes(rig.machines(p))) == ["n1", "n2"]
+    assert asyncio.run(rig.observe_rig({"rig": "installed"})) == "installed"      # the observer asks the provider
+    with pytest.raises(OutcomeError, match="needs n3"):
+        asyncio.run(rig.require_nodes(rig.machines(p), "stage", "n3"))
+    fake.states = {n: "not_created" for n in fake.states}
+    assert asyncio.run(rig.observe_rig({"rig": "installed"})) == "absent"
+    assert all(c[0] == "status" for c in fake.calls)
+
+
+def test_control_the_default_provider_is_vagrant(rig_root, tmp_path, monkeypatch):
+    from testrunner.ext.vagrant import Vagrant
+    from testrunner.proc import Proc
+    no_vagrant(tmp_path, monkeypatch)
+    rig = rig_of(rig_root)
+    assert isinstance(rig.machines(Proc(tmp_path, tmp_path / "logs")), Vagrant)
+    with pytest.raises(OutcomeError, match="vagrant status. failed"):           # and it really runs vagrant
+        asyncio.run(rig.observe_rig({"rig": "installed"}))
+
+
+def test_the_machines_walk_kind_uses_the_rigs_provider(rig_root, tmp_path, monkeypatch):
+    from testrunner.ext.rig import kinds as k
+    from testrunner.proc import Proc
+    no_vagrant(tmp_path, monkeypatch)
+    fake = FakeProvider({"n4": "not_created"})
+
+    class OwnRig(Rig):
+        def machines(self, proc, params=None):
+            return fake
+    import yaml
+    rig = OwnRig(rig_root, yaml.safe_load(DEFAULT), rig_root / "configs" / "default.yml", "default")
+    p = Proc(tmp_path, tmp_path / "logs")
+    asyncio.run(k.machines_step({"machines": "up", "names": ["n4"], "parallel": False}, rig, p, {}))
+    asyncio.run(k.machines_step({"machines": "destroy", "names": "all"}, rig, p, {}))
+    assert fake.calls == [("up", ("n4",), ("parallel",)), ("destroy", None)]
+    for bad, msg in (({"machines": "up"}, "no machine named"), ({"machines": "destroy"}, "names: all"),
+                     ({"machines": "halt", "names": ["n4"]}, "not up or destroy")):
+        with pytest.raises(OutcomeError, match=msg):
+            asyncio.run(k.machines_step(bad, rig, p, {}))

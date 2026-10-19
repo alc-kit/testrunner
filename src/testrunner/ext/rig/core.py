@@ -16,7 +16,8 @@ from ...proc import Proc
 from ..ansible import Ansible
 from ..console import ConsoleCapture
 from ..console import missing_tools as console_missing_tools
-from ..vagrant import NOT_CREATED, Vagrant
+from ..machines import NOT_CREATED, MachineProvider
+from ..vagrant import Vagrant
 from . import config as rig_config_engine
 from . import nodes as rig_nodes
 from .settings import RigSettings, load_settings
@@ -260,8 +261,13 @@ class Rig:
     def vagrant(self, proc: Proc, params: dict | None = None) -> Vagrant:
         return Vagrant(proc, cwd=self.root, env=self.env(params))
 
+    def machines(self, proc: Proc, params: dict | None = None) -> MachineProvider:
+        """What creates this rig's machines: vagrant, unless a rig overrides this with a provider
+        of its own (ext/machines.py; WP testrunner §6c.6, mode d)."""
+        return self.vagrant(proc, params)
+
     # ── what exists ──
-    async def live_nodes(self, vg: Vagrant) -> list[str]:
+    async def live_nodes(self, vg: MachineProvider) -> list[str]:
         """The rig's cluster nodes that EXIST right now (asked of vagrant, in catalogue order).
         Every catalogue node is asked, not only the scenario's: a node another scenario left
         running still exists. One the Vagrantfile does not define is not created; that is only
@@ -281,7 +287,7 @@ class Rig:
         log.info("live %s nodes: %s", self.settings.cluster_noun, live or "none")
         return live
 
-    async def live_limit(self, vg: Vagrant) -> list[str]:
+    async def live_limit(self, vg: MachineProvider) -> list[str]:
         """live_nodes, refusing to be empty: `--limit ''` matches nothing and exits 0."""
         nodes = await self.live_nodes(vg)
         if not nodes:
@@ -289,7 +295,7 @@ class Rig:
                 "stage against an empty host set — ansible would exit 0 having done nothing. Run `up` first.")
         return nodes
 
-    async def require_nodes(self, vg: Vagrant, stage: str, *nodes: str, subset: str | None = None) -> list[str]:
+    async def require_nodes(self, vg: MachineProvider, stage: str, *nodes: str, subset: str | None = None) -> list[str]:
         """Refuse a stage hard-wired to a node this rig does not have."""
         live = await self.live_nodes(vg)
         log.debug("%s needs %s; live %s", stage, list(nodes), live)
@@ -374,7 +380,7 @@ timeout = 30
         refuses to load without it, so on a fresh checkout `vagrant status` would fail."""
         self.ensure_bootstrap()
         p = Proc(self.root, self.logs)
-        live = await self.live_nodes(self.vagrant(p))
+        live = await self.live_nodes(self.machines(p))
         if not live:
             log.info("observe rig: no %s node exists -> absent (the model said %r)", self.settings.cluster_noun,
                      state.get("rig"))
@@ -426,7 +432,7 @@ timeout = 30
         return left
 
     # ── stale per-node state (the settings' stale_files) ──
-    async def purge_stale_node_state(self, vg: Vagrant) -> None:
+    async def purge_stale_node_state(self, vg: MachineProvider) -> None:
         """A node about to be CREATED gets blank disks: anything the controller still holds
         about an earlier node of that name is stale, and stale is not harmless (measured: a
         leftover recovery key made an encryption role skip provisioning entirely). Purged per node, and

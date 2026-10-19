@@ -19,7 +19,7 @@ from ..proc import Proc, Result
 
 logger = logging.getLogger(__name__)   # not `log`: methods take a log= file name
 
-NOT_CREATED = "not_created"
+from .machines import NOT_CREATED  # noqa: E402,F401  (one definition, the provider seam)
 
 
 def parse_machine_readable(text: str) -> dict[str, str]:

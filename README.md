@@ -527,6 +527,44 @@ python -m testrunner.ext.rig.drive_rules {check|render} ...
 A rig usually keeps a three-line `bin/` wrapper for each. The package docstring
 (`testrunner/ext/rig/__init__.py`) and each module's header have the details.
 
+## The Vagrant layer
+
+`ext.rig` ships the DEFAULT Vagrantfile for a vagrant + libvirt rig, as a Ruby library
+(`src/testrunner/ext/rig/vagrant/rig.rb`) that a rig's own `Vagrantfile` loads. Vagrant only
+ever evaluates the rig's `Vagrantfile`, so the rig chooses how much of it to use:
+
+```ruby
+# (a) the default, as is
+require_relative "testrunner/src/testrunner/ext/rig/vagrant/rig"
+RigVagrant.configure(root: __dir__, network: "my-rig-net")
+
+# (b) the default, with hooks for what this rig does differently
+RigVagrant.configure(root: __dir__) do |rig|
+  rig.networks { |node, name, spec| ... }                  # replaces the default network
+  rig.machines { |nodes| ... }                             # filter or change the machine table
+  rig.autostart { |name, spec| ... }                       # default: not for catalogue `late:`
+  rig.domain { |lv, name, spec| ... }                      # after the default libvirt settings
+  rig.provision(:after_names) { |node, name, spec| ... }   # or :after_key
+end
+```
+(c) A rig may instead write a `Vagrantfile` of its own and never require the library. (d) A rig
+may use no vagrant at all: its `Rig` subclass returns its own machine provider from
+`machines()` (`ext/machines.py`: `status`, `up`, `destroy`), and ext.rig's guards, its observer
+and the `machines:` walk kind use that instead.
+
+The default builds every machine of the node catalogue (`bin/rig-nodes json`) with its sizes
+(`overrides: {field: key}` → `<PREFIX>_<KEY>`), libvirt on the system daemon, the NIC model /
+q35 / virtio `ctrl_vlan` and an emulated IPMI BMC on `kind: pve` machines, a provisioner for
+predictable NIC names and the serial console, an apt cache (a squid box from
+`provision/squid.conf`, every other box pointed at it; `<CACHE_PREFIX>_APT_*`) and root login
+with `secrets/harness_key.pub`. `<PREFIX>` is testrunner.yml's `ext.rig.prefix`. A missing
+`squid.conf` warns and disables the cache: every vagrant command evaluates the Vagrantfile, a
+teardown too, so nothing a teardown does not need may fail it.
+
+`ext/rig/vagrant/record.rb` loads a Vagrantfile with a stub `Vagrant` that records every
+configuration call as JSON, and `check.py` compares the machines with the catalogue — a
+device-free test of any rig's Vagrantfile.
+
 ## The runner config
 
 `testrunner.yml` (or `.toml`) at the subscriber root:
