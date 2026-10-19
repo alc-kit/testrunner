@@ -20,6 +20,8 @@ An inner step is ONE of:
   {action: <name>, with: {...}}   any action (python, shell or another walk); its contract
                                   is that action's, unless the step declares its own
   {run: <argv | string>, env, cwd, rules, timeout, log}     a command (core)
+  {refuse: <message>, when: {...}}  fail with that message (core) — a stage on a rig it does not
+                                  belong to, refused by name, before anything runs
   {<kind>: <value>, ...}          a kind an extension registers (`@step_kind`: ext.ansible's
                                   `playbook`, ...)
 A command step's outcome is classified from evidence, then by its exit code:
@@ -53,7 +55,8 @@ WALK_KEYS = {"doc", "requires", "produces", "produces_on", "outcomes", "readonly
              "extends", "params", "steps"}
 CONTRACT_KEYS = {"id", "when", "requires", "produces", "produces_on", "outcomes", "expect", "on", "retry",
                  "max_visits", "always", "doc", "readonly", "nolog"}
-CORE_KINDS = {"action": ("with",), "run": ("env", "cwd", "rules", "timeout", "log")}
+CORE_KINDS = {"action": ("with",), "run": ("env", "cwd", "rules", "timeout", "log"), "refuse": ()}
+READONLY_CORE = {"refuse"}                  # core kinds whose steps only look
 BUILTIN_REFS = ("param.", "env.", "run.", "step.", "state.")
 EVIDENCE = {"exit", "output", "timed_out"}
 
@@ -266,7 +269,8 @@ def _inner_steps(reg: Registry, rc: RunnerConfig, w: WalkSpec, kinds: set[str]) 
         common = dict(
             requires=dict(st.get("requires") or {}), produces=dict(st.get("produces") or {}),
             produces_on={k: dict(v) for k, v in (st.get("produces_on") or {}).items()},
-            doc=str(st.get("doc", "")), readonly=bool(st.get("readonly", False)),
+            doc=str(st.get("doc", "")),
+            readonly=bool(st.get("readonly", kind in READONLY_CORE or kind in reg.readonly_kinds)),
             nolog=bool(st.get("nolog", reg.actions[w.name].nolog)), source=where, inner_of=w.name)
         if kind == "action":
             target = st["action"]

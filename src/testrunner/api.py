@@ -77,6 +77,7 @@ class HookMark:
 class StepKindMark:
     name: str
     keys: tuple[str, ...] = ()
+    readonly: bool = False
 
 
 @dataclass
@@ -147,16 +148,18 @@ def hook(name: str) -> Callable:
     return mark
 
 
-def step_kind(name: str, *, keys: Iterable[str] = ()) -> Callable:
+def step_kind(name: str, *, keys: Iterable[str] = (), readonly: bool = False) -> Callable:
     """Export an inner-step kind for walk actions (`{<name>: value, <keys>...}` in a walk).
 
     The function receives the step's RENDERED spec as `spec` (the kind's own value under
     `spec[name]`) plus any fixtures it names, and returns a proc Result (classified by the
     step's `outcomes:` evidence, then passed on exit 0), an Outcome, or None (passed).
-    keys  the other keys the kind takes besides its own name (checked when walks load)
+    keys      the other keys the kind takes besides its own name (checked when walks load)
+    readonly  its steps only LOOK (a guard): read-only unless a step says otherwise, so reality
+              is not re-read after them and a run of them takes no writer lock
     """
     def mark(fn: Callable) -> Callable:
-        setattr(fn, MARK, StepKindMark(name=name, keys=tuple(keys)))
+        setattr(fn, MARK, StepKindMark(name=name, keys=tuple(keys), readonly=readonly))
         return fn
     return mark
 

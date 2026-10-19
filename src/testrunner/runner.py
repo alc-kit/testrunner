@@ -825,6 +825,9 @@ class Runner:
             log.info("%s: %s step (NOLOG: its values are not logged)", ctx.id, kind)
         else:
             log.info("%s: %s step %s", ctx.id, kind, spec)
+        if kind == "refuse":
+            log.info("%s: refuses: %s", ctx.id, spec["refuse"])
+            return Outcome(FAILED, str(spec["refuse"]))
         if kind == "run":
             value = await self._run_kind(spec, scope, ctx)
         else:
