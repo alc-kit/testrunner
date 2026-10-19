@@ -45,6 +45,26 @@ actions:
     produces: {data: balanced}
     outcomes: [refused]
 ```
+Or, when the action is a sequence of things that already exist — playbooks, commands, other
+actions — compose it as a **walk** (README, "Walk actions") instead of writing Python:
+```yaml
+# actions/rebalance.yml (listed in testrunner.yml: action_files: [actions/*.yml])
+actions:
+  rebalance:
+    outcomes: [refused]
+    produces: {data: balanced}
+    steps:
+      - {id: drain, playbook: drain.yml, limit: "{live}"}
+      - id: move
+        playbook: rebalance.yml
+        rules: rules/rebalance.yml
+        outcomes: {refused: {exit: nonzero, output: "pre-flight refused"}}
+        on: {refused: {end: refused}}
+      - {id: undrain, playbook: undrain.yml, limit: "{live}", always: true}
+```
+Each inner step then has its own outcome, effect and reaction, so a failure says exactly
+which step failed and what state it left; `--resume` starts at that step.
+
 Rules of thumb:
 - **Let a fixture own repeated setup.** If two actions need the same client, inventory or
   scope check, write a `@fixture` (with `yield` for cleanup) and take it as a parameter.
