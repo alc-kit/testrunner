@@ -143,3 +143,24 @@ def test_none_unsets_an_inherited_variable(tmp_path, monkeypatch):
     assert "[unset]" in r.text
     r = run(Proc(tmp_path, tmp_path).run('echo "[${TR_GONE-unset}]"'))
     assert "[was-here]" in r.text          # control: without None it is inherited
+
+
+# ansible's `pause` prints its prompt as `...abort\r\n\r\n:\r\n` — the marker on a line of its
+# own, newline and all — and then waits (every GATE prompt in the rigs' logs since 2026-08 has
+# this shape). The cursor is on an EMPTY line, so a detector that reads only the line after the
+# last newline never sees it: the 2026-10-19 gate3 run sat at a convert pre-flight until its
+# timeout. A line that is ONLY a prompt marker, followed by the newline, is a prompt too.
+PAUSE_PROMPT = r"printf 'Type  YES  (uppercase) to continue, or anything else to abort\r\n\r\n:\r\n'; read -r a"
+
+
+def test_a_prompt_marker_on_its_own_line_is_a_prompt(tmp_path):
+    r = run(Proc(tmp_path, tmp_path).run(PAUSE_PROMPT, prompt_idle=0.4, timeout=20))
+    assert not r.timed_out, "the bare ':' line was not seen as a prompt: the command ran into its timeout"
+    assert not r.ok and r.unanswered == ":"
+
+
+def test_a_quiet_line_that_merely_ends_like_a_prompt_is_not_one(tmp_path):
+    # control: `ok: [host]` ends in `]` and has a colon, yet it is output, not a prompt
+    r = run(Proc(tmp_path, tmp_path).run(r"printf 'ok: [pve-val-1]\r\n'; sleep 1.2; echo done",
+                                         prompt_idle=0.3, timeout=20))
+    assert r.ok and r.unanswered is None

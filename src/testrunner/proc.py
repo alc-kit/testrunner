@@ -100,6 +100,11 @@ def fill_rules(template: Path | str, values: dict[str, Any]) -> list[dict]:
     return filled
 
 
+# a line that is ONLY a prompt marker — ansible's `pause` writes its ":" on a line of its own,
+# newline included, so the cursor waits on the empty line after it
+BARE_PROMPT = re.compile(r"[:?>]")
+
+
 def load_rules(rules: Any) -> list[Rule]:
     """A list of rule dicts, or a path to a JSON/YAML file holding one."""
     if rules is None:
@@ -308,10 +313,20 @@ class Proc:
                 if time.monotonic() - last_output < idle_limit or any(not t.done() for t in sends):
                     continue
                 line_start = plain.rfind(b"\n") + 1
-                if line_start < scanned:
-                    continue   # this partial line was already answered
                 tail = bytes(plain[line_start:]).decode(errors="replace").strip()
-                if not tail or not self.prompt_re.search(tail):
+                if not tail:
+                    # the cursor is on an empty line: a prompt that ENDED its line counts when
+                    # that line is nothing but a prompt marker (ansible's pause: "...\r\n:\r\n")
+                    prev_end = len(plain[:line_start].rstrip(b"\r\n"))
+                    prev_start = plain.rfind(b"\n", 0, prev_end) + 1
+                    prev = bytes(plain[prev_start:prev_end]).decode(errors="replace").strip()
+                    if not BARE_PROMPT.fullmatch(prev):
+                        continue
+                    logger.debug("cmd#%d: the last line is a bare prompt marker %r, followed by a newline", seq, prev)
+                    line_start, tail = prev_start, prev
+                if line_start < scanned:
+                    continue   # this line was already answered
+                if not self.prompt_re.search(tail):
                     continue
                 if self.ui is None or not self.ui.interactive or not ask_operator:
                     logger.warning("cmd#%d: prompt %r unanswered for %ss and no rule matches; nobody may be "
