@@ -73,6 +73,17 @@ class HookMark:
     name: str
 
 
+@dataclass
+class StepKindMark:
+    name: str
+    keys: tuple[str, ...] = ()
+
+
+@dataclass
+class ResolverMark:
+    name: str
+
+
 def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None,
            produces: Mapping[str, Any] | None = None,
            produces_on: Mapping[str, Mapping[str, Any]] | None = None,
@@ -132,5 +143,30 @@ def hook(name: str) -> Callable:
 
     def mark(fn: Callable) -> Callable:
         setattr(fn, MARK, HookMark(name=name))
+        return fn
+    return mark
+
+
+def step_kind(name: str, *, keys: Iterable[str] = ()) -> Callable:
+    """Export an inner-step kind for walk actions (`{<name>: value, <keys>...}` in a walk).
+
+    The function receives the step's RENDERED spec as `spec` (the kind's own value under
+    `spec[name]`) plus any fixtures it names, and returns a proc Result (classified by the
+    step's `outcomes:` evidence, then passed on exit 0), an Outcome, or None (passed).
+    keys  the other keys the kind takes besides its own name (checked when walks load)
+    """
+    def mark(fn: Callable) -> Callable:
+        setattr(fn, MARK, StepKindMark(name=name, keys=tuple(keys)))
+        return fn
+    return mark
+
+
+def resolver(name: str) -> Callable:
+    """Export a template resolver for walk actions: `{<name>}` or `{<name>:<arg>}` in a walk's
+    values. The function receives `arg` (a string, "" when none is given) plus any fixtures
+    it names, and returns the value. A string that is exactly one reference becomes the
+    value itself (a list stays a list)."""
+    def mark(fn: Callable) -> Callable:
+        setattr(fn, MARK, ResolverMark(name=name))
         return fn
     return mark

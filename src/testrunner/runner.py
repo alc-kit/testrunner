@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TextIO
 
-from .api import (ABORTED, ERRORED, FAILED, PASSED, SKIPPED, Outcome, OutcomeError)
+from .api import (ABORTED, BUILTIN_OUTCOMES, ERRORED, FAILED, PASSED, SKIPPED, Outcome, OutcomeError)
 from .config import RunConfig, RunnerConfig, deep_merge, lookup
 from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
@@ -31,6 +31,7 @@ from . import report
 from .log import STEP
 from .nolog import Secrets, values_at
 from .store import Store
+from . import template
 from .term import Style, color_enabled, forward_colour
 from .ui import InputBroker
 
@@ -125,6 +126,14 @@ class RunContext(Background):
         return self.secrets.add(value)
 
 
+@dataclass
+class WalkFrame:
+    """A walk action being walked: its spec, the parameters its step was given, its step."""
+    walk: Any
+    params: dict
+    ctx: "StepContext"
+
+
 class StepContext(Background):
     """The `step` fixture."""
 
@@ -135,6 +144,12 @@ class StepContext(Background):
         self.spec, self.log_dir, self.params = step, log_dir, params
         self.started = time.monotonic()
         self.metrics: dict[str, Any] = {}
+        self.parent: str | None = None      # an inner step: the id of the walk action's step
+
+    @property
+    def file_id(self) -> str:
+        """The id as a file name: an inner step's `walk/step` becomes `walk.step`."""
+        return file_id(self.id)
 
     def metric(self, name: str, value: Any) -> None:
         """Record a number (or short text) for this step: journalled, shown in the report."""
@@ -167,6 +182,9 @@ class Runner:
         self.fixtures = Fixtures(reg.fixtures, BUILTIN_RUN | BUILTIN_STEP)
         self._current_task: asyncio.Task | None = None
         self._aborted = False
+        self._frames: list[WalkFrame] = []      # the walk actions being walked, innermost last
+        self._run_ctx: RunContext | None = None
+        self._run_scope: Scope | None = None
         # one Secrets for the whole run: config-marked values now, run.nolog() ones later
         self.secrets = Secrets(values_at(run_config.data, run_config.nolog_paths))
 
@@ -248,6 +266,7 @@ class Runner:
         run.forwarded = self.forwarded
         run_scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui,
                                   "registry": self.reg})
+        self._run_ctx, self._run_scope = run, run_scope
         self.ui.attach()
         self.ui.command("status", self._cmd_status(run))
         self.ui.command("abort", self._cmd_abort)
@@ -328,8 +347,11 @@ class Runner:
         visits: dict[str, int] = {}
         index = 0
         end = WalkEnd(True)
+        last_main = -1                    # the main-path position reached (walks: `always` steps after it)
+        early = False                     # the walk ended before its last step (fail / skip / end)
         while cur is not None:
             step = walker.current(cur)
+            last_main = max(last_main, cur[0][1])
             index += 1
             num = f"{label}{index}"
             full = prefix + step.id
@@ -341,7 +363,8 @@ class Runner:
                                 f"visited more than max_visits={step.max_visits} times")
                 log.error("%s: %s — the %s stops", full, sr.detail, "walk" if prefix else "run")
                 run.results.append(sr)
-                return WalkEnd(False, sr.detail, ERRORED, f"{full}: {sr.detail}")
+                end, early = WalkEnd(False, sr.detail, ERRORED, f"{full}: {sr.detail}"), True
+                break
             token = STEP.set(full)
             try:
                 sr = await self._step(run, run_scope, step, num, data, program=program, prefix=prefix,
@@ -371,6 +394,11 @@ class Runner:
                 STEP.reset(token)
             if self._aborted:
                 log.warning("aborted by the operator after %s", full)
+                always = [s.id for s in program.main[last_main + 1:] if s.always]
+                if always:
+                    # an abort hands the system to the operator, as it is: nothing more runs
+                    log.warning("aborted: the always step(s) %s do NOT run", [prefix + a for a in always])
+                    self.journal("always_not_run", steps=[prefix + a for a in always], why="aborted")
                 return WalkEnd(False, "aborted by the operator", ABORTED, "aborted by the operator")
             t = walker.next(cur, sr.outcome, run.state)
             sr.verdict = t.verdict
@@ -379,13 +407,51 @@ class Runner:
                      prefix + walker.current(t.cursor).id if t.cursor is not None
                      else "(end of walk)" if prefix else "(end of run)")
             if t.verdict == "failed":
-                end = WalkEnd(False, t.why, sr.outcome, f"{full}: {sr.outcome}"
+                end = WalkEnd(False, t.why, t.ends or sr.outcome, prefix + t.why
                               + (f" — {sr.detail}" if sr.detail else ""))
+                early = True
+            elif t.verdict == "ended":         # walks: skip / {end: x}
+                end, early = WalkEnd(True, t.why, t.ends or PASSED, t.why), True
+                self.say(self.style.dim(f"     {t.why}"))
+            elif t.verdict == "ignored":       # walks: recorded, and the walk goes on
+                self.journal("step_ignored", step=full, outcome=sr.outcome, why=t.why)
+                self.say(self.style.warn(f"     {t.why}"))
             elif t.verdict == "diverted":
                 self.say(f"     {t.why}")
             elif t.why:                       # a routing decision on the expected outcome (a rule, a goto)
                 self.say(self.style.dim(f"     {t.why}"))
             cur = t.cursor
+        if early and prefix:
+            end = await self._always(run, run_scope, program, last_main, data, prefix, label, index, end)
+        return end
+
+    async def _always(self, run: RunContext, run_scope: Scope, program: Program, last_main: int, data: dict,
+                      prefix: str, label: str, index: int, end: WalkEnd) -> WalkEnd:
+        """The `always` steps after the position the walk left at, in order, whatever happened.
+        Their failure never hides the walk's own: both are recorded; a walk that was ending
+        well (skip / end) fails."""
+        for step in program.main[last_main + 1:]:
+            if not step.always:
+                continue
+            index += 1
+            full = prefix + step.id
+            log.info("%s: always — the walk left at %s (%s), this still runs", full,
+                     prefix + program.main[last_main].id if last_main >= 0 else "its start", end.why)
+            token = STEP.set(full)
+            try:
+                sr = await self._step(run, run_scope, step, f"{label}{index}", data, program=program, prefix=prefix)
+            finally:
+                STEP.reset(token)
+            sr.verdict = "always"
+            if sr.outcome != program.expected(step.id).outcome and sr.outcome != SKIPPED:
+                what = f"always step {full} ended {sr.outcome}" + (f" — {sr.detail}" if sr.detail else "")
+                log.error("%s", what)
+                if end.passed:
+                    end = WalkEnd(False, what, sr.outcome if sr.outcome in BUILTIN_OUTCOMES else FAILED, what)
+                else:
+                    end = WalkEnd(False, end.why, end.outcome, f"{end.detail}; {what}")
+            if self._aborted:
+                break
         return end
 
     async def _reobserve(self, run: RunContext, scope: Scope, where: str,
@@ -484,6 +550,8 @@ class Runner:
         step_data = deep_merge(data, {rc.params_section: params})
         log_dir = self.store.path("logs", "x").parent
         ctx = StepContext(step, act, index, log_dir, params, sid)
+        if prefix and self._frames:
+            ctx.parent = self._frames[-1].ctx.id
         run.current = ctx
         started = time.monotonic()
         log.info("step %s (#%s): action %s [%s, from %s]; with %s", sid, index, act.name, act.kind,
@@ -603,12 +671,10 @@ class Runner:
 
     async def _execute(self, act: ActionSpec, scope: Scope, ctx: StepContext, step_data: dict) -> Outcome:
         async def body() -> Any:
-            if act.kind == "shell":
-                return await self._shell(act, scope, ctx)
-            kwargs = await self.fixtures.kwargs_for(act.fn, scope)
-            log.debug("%s: calling %s(%s)", ctx.id, _fn_name(act.fn), ", ".join(kwargs))
-            return await call(act.fn, kwargs)
+            return await self._body(act, scope, ctx, step_data)
 
+        # a walk action's inner steps set their own current task: put this one back after them
+        outer_task = self._current_task
         self._current_task = asyncio.ensure_future(body())
         try:
             value = await self._current_task
@@ -627,14 +693,17 @@ class Runner:
         except FixtureError as e:
             log.error("%s: a fixture could not be provided: %s -> errored", ctx.id, e, exc_info=True)
             return Outcome(ERRORED, str(e))
+        except template.TemplateError as e:
+            log.error("%s: a template could not be rendered: %s -> errored", ctx.id, e)
+            return Outcome(ERRORED, self.secrets.text(str(e)))
         except Exception as e:  # noqa: BLE001 — an action's exception is its failure
             tb = traceback.format_exc()
-            (ctx.log_dir / f"{ctx.id}.traceback").write_text(self.secrets.text(tb))
+            (ctx.log_dir / f"{ctx.file_id}.traceback").write_text(self.secrets.text(tb))
             log.error("%s: the action raised %s: %s -> failed (traceback also in %s.traceback)",
-                      ctx.id, type(e).__name__, e, ctx.id, exc_info=True)
+                      ctx.id, type(e).__name__, e, ctx.file_id, exc_info=True)
             return Outcome(FAILED, self.secrets.text(f"{type(e).__name__}: {e}"))
         finally:
-            self._current_task = None
+            self._current_task = outer_task
         log.debug("%s: the action returned %r", ctx.id, value)
         if value is None or value is True:
             return Outcome(PASSED)
@@ -646,6 +715,150 @@ class Runner:
             return Outcome(value)
         log.error("%s: the action returned a %s, which is not an outcome", ctx.id, type(value).__name__)
         return Outcome(ERRORED, f"action returned {type(value).__name__}; want None/bool/Outcome")
+
+    async def _body(self, act: ActionSpec, scope: Scope, ctx: StepContext, step_data: dict) -> Any:
+        if act.kind == "shell":
+            return await self._shell(act, scope, ctx)
+        if act.kind == "walk":
+            return await self._run_walk(act, scope, ctx, step_data)
+        if act.kind == "call":
+            return await self._call(act, scope, ctx, step_data)
+        if act.kind == "cmd":
+            return await self._cmd(act, scope, ctx)
+        kwargs = await self.fixtures.kwargs_for(act.fn, scope)
+        log.debug("%s: calling %s(%s)", ctx.id, _fn_name(act.fn), ", ".join(kwargs))
+        return await call(act.fn, kwargs)
+
+    # ── walk actions ──
+    async def _run_walk(self, act: ActionSpec, scope: Scope, ctx: StepContext, step_data: dict) -> Outcome:
+        """Walk the action's inner steps (a program of their own, ids `<step>/<inner>`), and
+        end with the outcome the walk ended with."""
+        w = act.walk
+        log.info("%s: walk action %s — inner steps %s; params %s (defaults %s)", ctx.id, act.name,
+                 [s.id for s in w.program.main], ctx.params or "{}", w.params or "{}")
+        self._frames.append(WalkFrame(w, ctx.params, ctx))
+        try:
+            end = await self._walk(self._run_ctx, self._run_scope, w.program, step_data,
+                                   prefix=f"{ctx.id}/", label=f"{ctx.index}.")
+        finally:
+            self._frames.pop()
+        if end.passed and end.outcome == PASSED:
+            log.info("%s: the walk went through: passed", ctx.id)
+            return Outcome(PASSED)
+        if end.passed:                                    # ended by `skip` / `{end: x}`
+            log.info("%s: the walk ended %s (%s)", ctx.id, end.outcome, end.why)
+            return Outcome(end.outcome, end.detail)
+        o = end.outcome
+        # a walk that FAILED never ends passed/skipped: an inner step that passed where the walk
+        # expected a refusal is exactly the failure (and an undeclared named outcome is failed)
+        mapped = o if o in (FAILED, ERRORED, ABORTED) or o in act.outcomes else FAILED
+        log.info("%s: the walk failed: %s%s", ctx.id, end.detail,
+                 "" if mapped == o else f" -> {FAILED} (the walk does not declare {o!r})")
+        return Outcome(mapped, end.detail)
+
+    def _resolver(self, scope: Scope, ctx: StepContext) -> Callable:
+        """`resolve(name, arg)` for the templates of the inner step `ctx` (template.py)."""
+        frame = self._frames[-1]
+        run = self._run_ctx
+
+        async def resolve(name: str, arg: str, depth: int = 0) -> Any:
+            if name.startswith("param."):
+                key = name[6:]
+                v = lookup(frame.params, key, _ABSENT)
+                if v is _ABSENT:
+                    v = lookup(frame.walk.params, key, _ABSENT)
+                    if isinstance(v, (str, list, dict)) and depth < 4:
+                        # a default may itself reference: params: {victim: "{role:victim}"}
+                        v = await template.render(v, lambda n, a: resolve(n, a, depth + 1))
+                if v is _ABSENT:
+                    raise template.TemplateError(f"{{{name}}}: no parameter {key!r} (the walk {frame.walk.name} "
+                                                 f"declares {sorted(frame.walk.params) or 'none'})")
+                if v is None:
+                    raise template.TemplateError(f"{{{name}}}: the parameter is null (unset)")
+                return v
+            if name.startswith("env."):
+                if name[4:] not in os.environ:
+                    raise template.TemplateError(f"{{{name}}}: not in the environment")
+                return os.environ[name[4:]]
+            if name.startswith("state."):
+                return run.state.get(name[6:])
+            facts = {"run.root": str(self.rc.root), "run.id": self.run_id, "run.state_dir": str(self.store.root),
+                     "run.config": str(self.run_config.file or ""), "step.id": ctx.id, "step.parent": frame.ctx.id}
+            if name in facts:
+                return facts[name]
+            if name in self.reg.resolvers:
+                fn, source = self.reg.resolvers[name]
+                kwargs = await self.fixtures.kwargs_for(fn, Scope("resolve", {"arg": arg}, parent=scope))
+                value = await call(fn, kwargs)
+                log.info("%s: {%s%s} -> %r (resolver %s)", ctx.id, name, f":{arg}" if arg else "", value, source)
+                return value
+            raise template.TemplateError(f"{{{name}}}: no such reference")
+        return resolve
+
+    async def _call(self, act: ActionSpec, scope: Scope, ctx: StepContext, step_data: dict) -> Any:
+        """An inner step that runs another action, with its `with:` rendered NOW."""
+        target = self.reg.actions[act.call]
+        resolve = self._resolver(scope, ctx)
+        with_ = await template.render(act.call_with, resolve)
+        params = deep_merge(ctx.params, with_)
+        log.info("%s: calls %s [%s] with %s", ctx.id, target.name, target.kind, with_ or "{}")
+        ctx.params = params
+        scope.values["params"] = params
+        return await self._body(target, scope, ctx, deep_merge(step_data, {self.rc.params_section: params}))
+
+    async def _cmd(self, act: ActionSpec, scope: Scope, ctx: StepContext) -> Any:
+        """An inner command step: render it, run it by its kind, classify what happened."""
+        kind, spec, classify = act.inner["kind"], act.inner["spec"], act.inner["classify"]
+        resolve = self._resolver(scope, ctx)
+        spec = await template.render(spec, resolve)
+        evidence = {}
+        for name, ev in classify.items():
+            evidence[name] = {**ev, **({"output": await template.render(ev["output"], resolve, escape=re.escape)}
+                                       if "output" in ev else {})}
+        if act.nolog:
+            log.info("%s: %s step (NOLOG: its values are not logged)", ctx.id, kind)
+        else:
+            log.info("%s: %s step %s", ctx.id, kind, spec)
+        if kind == "run":
+            value = await self._run_kind(spec, scope, ctx)
+        else:
+            fn, _, source = self.reg.step_kinds[kind]
+            kwargs = await self.fixtures.kwargs_for(fn, Scope("kind", {"spec": spec}, parent=scope))
+            log.debug("%s: kind %s -> %s(%s)", ctx.id, kind, source, ", ".join(kwargs))
+            value = await call(fn, kwargs)
+        return self._judge(value, evidence, ctx)
+
+    async def _run_kind(self, spec: dict, scope: Scope, ctx: StepContext) -> Any:
+        run = spec["run"]
+        argv = [str(w) for w in run] if isinstance(run, list) else ["bash", "-c", str(run)]
+        env = {k: None if v is None else str(v) for k, v in (spec.get("env") or {}).items()}
+        cwd = self.rc.root / str(spec["cwd"]) if spec.get("cwd") else self.rc.root
+        rules = spec.get("rules")
+        if isinstance(rules, str):
+            rules = self.rc.root / rules
+        proc: Proc = scope.values["proc"]
+        return await proc.run(argv, cwd=cwd, env=env, log=str(spec.get("log") or f"{ctx.file_id}.log"),
+                              rules=rules, timeout=spec.get("timeout"))
+
+    def _judge(self, value: Any, evidence: dict, ctx: StepContext) -> Any:
+        """A command step's outcome: what its kind said, else the first `outcomes:` evidence
+        that holds, else unanswered prompt / timeout / exit code."""
+        if not hasattr(value, "returncode"):         # an Outcome, None, a bool: the kind decided
+            return value
+        r = value
+        if r.unanswered is not None:
+            log.info("%s: an unanswered prompt -> failed", ctx.id)
+            return Outcome(FAILED, f"unanswered prompt: {r.unanswered!r}")
+        text = r.text
+        for name, ev in evidence.items():
+            held, why = _evidence_holds(ev, r.returncode, text, r.timed_out)
+            log.info("%s: outcome %s %s: %s", ctx.id, name, "HOLDS" if held else "does not hold", "; ".join(why))
+            if held:
+                return Outcome(name, "; ".join(why))
+        if r.timed_out:
+            return Outcome(FAILED, "timed out")
+        log.info("%s: exit %d -> %s", ctx.id, r.returncode, PASSED if r.returncode == 0 else FAILED)
+        return Outcome(PASSED) if r.returncode == 0 else Outcome(FAILED, f"exit {r.returncode}")
 
     async def _shell(self, act: ActionSpec, scope: Scope, ctx: StepContext) -> Outcome:
         spec = act.shell or {}
@@ -662,7 +875,7 @@ class Runner:
         proc: Proc = scope.values["proc"]
         log.debug("%s: shell action, argv formatted from params: %s", ctx.id,
                   [argv[0], "<NOLOG action: arguments not logged>"] if act.nolog else argv)
-        r = await proc.run(argv, cwd=cwd, env=env, log=f"{ctx.id}.log", rules=rules,
+        r = await proc.run(argv, cwd=cwd, env=env, log=f"{ctx.file_id}.log", rules=rules,
                            timeout=spec.get("timeout"))
         if r.unanswered is not None:
             return Outcome(FAILED, f"unanswered prompt: {r.unanswered!r}")
@@ -682,6 +895,34 @@ class Runner:
             self.say(self.style.bad(line) if sr.verdict == "failed" else line)
         self.say(self.style.ok("==== PASSED ====") if result.passed
                  else self.style.bad(f"==== FAILED: {result.why} ===="))
+
+
+def file_id(step_id: str) -> str:
+    """A step id as a file name: an inner step's `walk/step` becomes `walk.step`."""
+    return step_id.replace("/", ".")
+
+
+def _evidence_holds(ev: dict, returncode: int, text: str, timed_out: bool) -> tuple[bool, list[str]]:
+    """Does a classification's evidence hold? ALL keys must; (held, what was seen)."""
+    seen = []
+    ok = True
+    if "exit" in ev:
+        want = ev["exit"]
+        hit = (returncode == 0 if want == "zero" else returncode != 0 if want == "nonzero"
+               else returncode in want if isinstance(want, list) else returncode == want)
+        seen.append(f"exit {returncode} {'is' if hit else 'is not'} {want}")
+        ok &= hit
+    if "timed_out" in ev:
+        hit = bool(timed_out) == bool(ev["timed_out"])
+        seen.append(f"timed_out {timed_out}")
+        ok &= hit
+    if "output" in ev:
+        pats = ev["output"] if isinstance(ev["output"], list) else [ev["output"]]
+        for pat in pats:
+            hit = re.search(pat, text, re.M) is not None
+            seen.append(f"output {'matched' if hit else 'did not match'} {pat!r}")
+            ok &= hit
+    return ok, seen
 
 
 def _fn_name(fn: Callable) -> str:

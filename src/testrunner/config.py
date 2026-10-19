@@ -109,6 +109,8 @@ class RunnerConfig:
     modules: list[Path] = field(default_factory=list)
     pythonpath: list[Path] = field(default_factory=list)
     shell_actions: dict[str, dict] = field(default_factory=dict)
+    # files holding more `actions:` (walk actions): globs, relative to the root
+    action_files: list[str] = field(default_factory=list)
     state_dir: Path = Path("state")
     states: dict[str, dict] = field(default_factory=dict)
     paths: dict[str, list] = field(default_factory=dict)
@@ -131,6 +133,16 @@ class RunnerConfig:
     config_hooks: list = field(default_factory=list)
 
 
+def _strings(value: Any, path: Path, key: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(f"{path}: {key}: want a list of paths (globs allowed)")
+    return list(value)
+
+
 def find_runner_config(start: Path) -> Path:
     cur = Path(start).resolve()
     for d in (cur, *cur.parents):
@@ -140,7 +152,7 @@ def find_runner_config(start: Path) -> Path:
     raise ConfigError(f"no {' / '.join(RUNNER_FILES)} in {cur} or above")
 
 
-KNOWN_RUNNER_KEYS = {"modules", "actions", "state_dir", "states", "paths", "default_path",
+KNOWN_RUNNER_KEYS = {"modules", "actions", "action_files", "state_dir", "states", "paths", "default_path",
                      "configs", "params_section", "input", "scenario", "pythonpath", "all", "ext"}
 
 
@@ -195,6 +207,7 @@ def load_runner_config(path: Path) -> RunnerConfig:
         modules=[root / m for m in (data.get("modules") or [])],
         pythonpath=[root / p for p in (data.get("pythonpath") or [])],
         shell_actions=data.get("actions") or {},
+        action_files=_strings(data.get("action_files"), path, "action_files"),
         state_dir=root / data.get("state_dir", "state"),
         states=states, paths=paths, default_path=default_path, all_fallback=all_fallback, ext=ext,
         configs_dir=root / configs.get("dir", "configs"),

@@ -412,6 +412,8 @@ def release(store: Store, style: Style) -> int:
 def listing(rc, reg) -> int:
     print("actions:")
     for a in sorted(reg.actions.values(), key=lambda a: a.name):
+        if a.inner_of is not None:      # a walk's inner step: part of its walk, never named alone
+            continue
         contract = []
         if a.requires:
             contract.append(f"requires {a.requires}")
