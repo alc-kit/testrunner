@@ -258,6 +258,25 @@ class Rig:
         return Ansible(proc, cwd=self.ansible_dir, inventory=self.inv, env=self.env(params),
                        forward_prefixes=(f"{self.PREFIX}_", "ANSIBLE_"))
 
+    async def step_ansible(self, proc: Proc, params: dict | None, step: Any, run: Any, prepare: Any) -> Ansible:
+        """The step's Ansible for a rig's `ans` fixture, the controller PREPARED by `await
+        prepare(ans)` before the step first uses it — once per step the plan walks (a walk
+        action's inner steps share their walk step's preparation: its index is the walk
+        step's, `12` of `12.3`), and NEVER in a --dry-run (it changes nothing; the commands are
+        described, not run). One definition for every rig, so they behave alike."""
+        a = self.ansible(proc, params)
+        if getattr(run, "dry", False):
+            log.info("(dry) the controller is not prepared for %s", step.id)
+            return a
+        key = (step.parent or step.id, str(step.index).split(".")[0])
+        if getattr(self, "_prepared_for", None) == key:
+            log.debug("prepare: already done for step %s (#%s)", *key)
+            return a
+        log.debug("prepare: step %s (#%s)", *key)
+        await prepare(a)
+        self._prepared_for = key
+        return a
+
     def vagrant(self, proc: Proc, params: dict | None = None) -> Vagrant:
         return Vagrant(proc, cwd=self.root, env=self.env(params))
 
