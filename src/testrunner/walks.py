@@ -20,6 +20,8 @@ An inner step is ONE of:
   {action: <name>, with: {...}}   any action (python, shell or another walk); its contract
                                   is that action's, unless the step declares its own
   {run: <argv | string>, env, cwd, rules, timeout, log}     a command (core)
+  {refuse: <message>, when: {...}}  fail with that message (core) — a stage on a rig it does not
+                                  belong to, refused by name, before anything runs
   {<kind>: <value>, ...}          a kind an extension registers (`@step_kind`: ext.ansible's
                                   `playbook`, ...)
 A command step's outcome is classified from evidence, then by its exit code:
@@ -53,7 +55,7 @@ WALK_KEYS = {"doc", "requires", "produces", "produces_on", "outcomes", "readonly
              "extends", "params", "steps"}
 CONTRACT_KEYS = {"id", "when", "requires", "produces", "produces_on", "outcomes", "expect", "on", "retry",
                  "max_visits", "always", "doc", "readonly", "nolog"}
-CORE_KINDS = {"action": ("with",), "run": ("env", "cwd", "rules", "timeout", "log")}
+CORE_KINDS = {"action": ("with",), "run": ("env", "cwd", "rules", "timeout", "log"), "refuse": ()}
 BUILTIN_REFS = ("param.", "env.", "run.", "step.", "state.")
 EVIDENCE = {"exit", "output", "timed_out"}
 

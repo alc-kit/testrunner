@@ -540,7 +540,7 @@ actions:
 
 def test_a_kind_without_its_extension_is_refused_at_load(s, capsys):
     code, out, _, _ = go(s, capsys, PLAY, "install")
-    assert code != 0 and "exactly ONE of action, run" in out
+    assert code != 0 and "an inner step is exactly ONE of" in out and "playbook" in out
 
 
 # ── ext.rig resolvers (a duck-typed rig: they only use its public API) ──────────────────────
@@ -701,3 +701,48 @@ actions:
     code = main(["--root", str(ext.root), "--color", "never", "--non-interactive", "w"])
     assert code == 0, capsys.readouterr()
     assert "--limit n1,n2,cache_hosts" in ext.calls.read_text()
+
+
+def test_refuse_fails_by_name_only_when_its_condition_holds(s, capsys):
+    walks = """
+actions:
+  w:
+    steps:
+      - {id: legacy, refuse: "stage w on a LEGACY rig — refused", when: {params.networking: legacy}}
+      - {id: work, run: "echo work >> trail"}
+"""
+    s.write("configs/default.yml", "params: {networking: legacy}\nplan: [w]\n")
+    code, out, ev, trail = go(s, capsys, walks)
+    assert code != 0 and "stage w on a LEGACY rig — refused" in out and trail == []
+    import shutil
+    shutil.rmtree(s.root / "state")
+    s.write("configs/default.yml", "params: {networking: sdn}\nplan: [w]\n")    # control
+    code, out, ev, trail = go(s, capsys, walks)
+    assert code == 0 and trail == ["work"]
+
+
+def test_require_hosts_refuses_an_empty_group_before_the_playbook(ext, capsys, monkeypatch):
+    import os
+    import stat
+    inv = ext.calls.parent / "bin" / "ansible-inventory"
+    inv.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "ansible-inventory $*" >> {ext.calls}\n'
+                   'echo \'{"all": {"children": ["web", "empty"]}, "web": {"hosts": ["w1"]}, "empty": {}}\'\n')
+    inv.chmod(inv.stat().st_mode | stat.S_IEXEC)
+    ext.write("walks/main.yml", """
+actions:
+  w:
+    params: {group: empty}
+    steps:
+      - {id: guard, require_hosts: "{param.group}", hint: "see ./run.sh membership"}
+      - {id: p, playbook: site.yml}
+""")
+    code = main(["--root", str(ext.root), "--color", "never", "--non-interactive", "w"])
+    out = capsys.readouterr().out
+    assert code != 0 and "targets the group 'empty', which resolves to NO hosts" in out and "membership" in out
+    assert "ansible-playbook" not in ext.calls.read_text()
+    import shutil
+    shutil.rmtree(ext.root / "state")
+    ext.write("configs/default.yml", "plan: [{action: w, with: {group: web}}]\n")     # control
+    code = main(["--root", str(ext.root), "--color", "never", "--non-interactive"])
+    assert code == 0, capsys.readouterr().out
+    assert "ansible-playbook site.yml" in ext.calls.read_text()

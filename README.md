@@ -291,7 +291,8 @@ actions:
 
 **Inner steps** are exactly one of: `action:` (any action, with `with:`; its contract is that
 action's unless the step declares its own), `run:` (a command: argv or a string, `env`, `cwd`,
-`rules`, `timeout`, `log`), or a kind an extension registers — `playbook:` (`ext.ansible`),
+`rules`, `timeout`, `log`), `refuse:` (fail with a message — with `when:`, a stage refused on a rig it
+does not belong to), or a kind an extension registers — `playbook:` (`ext.ansible`),
 `vagrant: up|destroy` (`ext.vagrant`) — or your own `@step_kind`.
 
 **Outcomes from evidence.** A command step passes on exit 0 and fails otherwise, unless an
@@ -492,7 +493,7 @@ what it needs:
 
 An extension's settings live in the runner config under `ext: {<name>: {...}}`. Enabling one
 there also loads the inner-step kinds and resolvers it registers for walk actions:
-`ext.ansible` -> `playbook:`, `ext.vagrant` -> `vagrant:`, `ext.rig` -> `{live}` `{role:x}`
+`ext.ansible` -> `playbook:`, `require_hosts: <group>` (refuse an empty group), `ext.vagrant` -> `vagrant:`, `ext.rig` -> `{live}` `{role:x}`
 `{roles:x}` `{rig:x}` `{inventory:h/x}` `{peer_of:n}` (`ext: {ansible: {}, vagrant: {}}`).
 
 **`ext.rig`** is what every such rig is built from, whatever it tests:

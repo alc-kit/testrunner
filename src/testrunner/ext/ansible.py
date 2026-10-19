@@ -447,3 +447,17 @@ async def playbook_step(spec, ans, run):
                               extra=spec.get("extra"), rules=rules, log=spec.get("log"),
                               timeout=spec.get("timeout"), check=False, prompt_idle=spec.get("prompt_idle"),
                               ask_operator=spec.get("ask_operator", True))
+
+
+@step_kind("require_hosts", keys=("hint",))
+async def require_hosts_step(spec, ans, step):
+    """`{require_hosts: <group>, hint: <what to check>}`: refuse unless the group resolves to at
+    least one host. A play that matches no hosts SUCCEEDS having done nothing — a rig once ran
+    install, reboot and form in seconds without touching a node."""
+    group, stage = str(spec["require_hosts"]), step.parent or step.id
+    hosts = await ans.group(group)
+    logger.info("%s targets group %s: %s", stage, group, hosts or "NO hosts")
+    if not hosts:
+        raise OutcomeError(FAILED, f"stage {stage!r} targets the group {group!r}, which resolves to NO hosts.\n"
+                                   "Ansible would treat that as success while doing nothing at all."
+                                   + (f" {spec['hint']}" if spec.get("hint") else ""))
