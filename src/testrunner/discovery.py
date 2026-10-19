@@ -71,6 +71,7 @@ class Registry:
     # walks: inner-step kinds {name: (fn, keys, source)} and template resolvers {name: (fn, source)}
     step_kinds: dict[str, tuple[Callable, tuple[str, ...], str]] = field(default_factory=dict)
     resolvers: dict[str, tuple[Callable, str]] = field(default_factory=dict)
+    readonly_kinds: set[str] = field(default_factory=set)       # kinds whose steps only look
 
 
 def _module_files(entry: Path) -> list[Path]:
@@ -177,6 +178,8 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
         if mark.name in reg.step_kinds:
             raise ConfigError(f"step kind {mark.name!r} exported twice: {reg.step_kinds[mark.name][2]} and {where}")
         reg.step_kinds[mark.name] = (obj, mark.keys, where)
+        if mark.readonly:
+            reg.readonly_kinds.add(mark.name)
     elif isinstance(mark, ResolverMark):
         if mark.name in reg.resolvers:
             raise ConfigError(f"resolver {mark.name!r} exported twice: {reg.resolvers[mark.name][1]} and {where}")

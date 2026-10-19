@@ -449,7 +449,7 @@ async def playbook_step(spec, ans, run):
                               ask_operator=spec.get("ask_operator", True))
 
 
-@step_kind("require_hosts", keys=("hint",))
+@step_kind("require_hosts", keys=("hint",), readonly=True)
 async def require_hosts_step(spec, ans, step):
     """`{require_hosts: <group>, hint: <what to check>}`: refuse unless the group resolves to at
     least one host. A play that matches no hosts SUCCEEDS having done nothing — a rig once ran

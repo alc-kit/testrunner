@@ -101,7 +101,7 @@ def config(arg, rig, params):
     return value
 
 
-@step_kind("require_nodes")
+@step_kind("require_nodes", readonly=True)
 async def require_nodes(spec, rig, vg, params, step):
     nodes = spec["require_nodes"]
     nodes = [nodes] if isinstance(nodes, str) else [str(n) for n in nodes or []]

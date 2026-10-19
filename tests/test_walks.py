@@ -746,3 +746,20 @@ actions:
     code = main(["--root", str(ext.root), "--color", "never", "--non-interactive"])
     assert code == 0, capsys.readouterr().out
     assert "ansible-playbook site.yml" in ext.calls.read_text()
+
+
+def test_guard_kinds_are_readonly_so_reality_is_not_reread_after_them(ext):
+    import textwrap
+    ext.write("walks/main.yml", textwrap.dedent("""
+        actions:
+          w:
+            steps:
+              - {id: guard, require_hosts: web}
+              - {id: nope, refuse: "nope", when: {params.x: 1}}
+              - {id: p, playbook: site.yml}
+              - {id: p2, playbook: site.yml, readonly: true}
+        """))
+    reg = collect(load_runner_config(ext.root / "testrunner.yml"))
+    assert reg.actions["w/guard"].readonly and reg.actions["w/nope"].readonly
+    assert not reg.actions["w/p"].readonly                     # control: a playbook changes things
+    assert reg.actions["w/p2"].readonly                        # a step may say so itself
