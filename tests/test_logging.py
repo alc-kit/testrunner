@@ -247,3 +247,21 @@ def test_a_when_key_the_config_does_not_have_is_warned(sub, capsys):
     sub.write("configs/default.yml", CONFIG)
     sub.run(capsys=capsys)
     assert "does not contain at all" not in trace(sub)
+
+
+def test_the_trace_names_the_rules_a_command_is_armed_with(sub, capsys):
+    # a prompt that changed wording goes unanswered: the trace must show what was EXPECTED
+    sub.write("testrunner.yml", RUNNER + """
+  asks:
+    run: 'printf "Continue? "; read a; echo got-$a'
+    rules: [{expect: 'Proceed\\? ', send: "yes\\r"}, {expect: 'Password: ', send: "hunter2\\r", nolog: true}]
+""")
+    sub.write("m.py", MOD)
+    sub.write("configs/default.yml", "plan: [asks]\n")
+    sub.write("testrunner.yml", (sub.root / "testrunner.yml").read_text() + "input: {prompt_idle: 1}\n")
+    code, out = sub.run(capsys=capsys)
+    assert code != 0                     # the changed prompt went unanswered
+    t = trace(sub)
+    assert re.search(r"cmd#\d+ rule 1: expect 'Proceed\\\\\? ' -> send 'yes\\r'", t), t[-3000:]
+    assert re.search(r"cmd#\d+ rule 2: expect 'Password: ' -> send <NOLOG>", t)
+    assert "hunter2" not in t
