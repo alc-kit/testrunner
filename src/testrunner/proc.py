@@ -195,6 +195,11 @@ class Proc:
                       env_delta({**self.env, **(env or {})}), self.log_dir / log if log else "-",
                       echo and self.echo is not None, timeout, idle_limit, len(compiled),
                       "" if ask_operator else ", operator NOT asked")
+            # what the command is ARMED with, not only what fired: a prompt that changed wording
+            # and went unanswered shows here as the pattern that no longer matches
+            for i, r in enumerate(compiled, 1):
+                logger.debug("cmd#%d rule %d: expect %r -> send %s", seq, i, r.expect.pattern.decode(errors="replace"),
+                             "<NOLOG>" if r.nolog else repr(self.secrets.text(r.send)))
         if self.show_command is not None:
             if quiet:
                 line = f"$ {shlex.quote(argv[0])} …   # NOLOG action: its arguments are not shown"
