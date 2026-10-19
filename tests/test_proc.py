@@ -161,6 +161,6 @@ def test_a_prompt_marker_on_its_own_line_is_a_prompt(tmp_path):
 
 def test_a_quiet_line_that_merely_ends_like_a_prompt_is_not_one(tmp_path):
     # control: `ok: [host]` ends in `]` and has a colon, yet it is output, not a prompt
-    r = run(Proc(tmp_path, tmp_path).run(r"printf 'ok: [pve-val-1]\r\n'; sleep 1.2; echo done",
+    r = run(Proc(tmp_path, tmp_path).run(r"printf 'ok: [node-1]\r\n'; sleep 1.2; echo done",
                                          prompt_idle=0.3, timeout=20))
     assert r.ok and r.unanswered is None
