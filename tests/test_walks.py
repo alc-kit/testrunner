@@ -649,3 +649,11 @@ def test_from_an_inner_step(s, capsys):
     code, out, ev, trail = go(s, capsys, GROW, "grow", "--from", "grow/join")
     assert code == 0, out
     assert trail == ["join"]
+
+
+def test_the_report_shows_a_failed_inner_steps_log(s, capsys):
+    walks = GROW.replace('"echo join >> trail"', '"echo the join broke; exit 1"')
+    code, out, ev, trail = go(s, capsys, walks, "grow", "--report", "--report-format", "md")
+    assert code != 0
+    md = (s.root / "state" / "reports" / "latest.md").read_text()
+    assert "grow/join" in md and "logs/grow.join.log" in md and "the join broke" in md

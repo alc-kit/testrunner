@@ -358,7 +358,7 @@ def _md(text: Any) -> str:
 
 def _log_tail(store: Store, step_id: str) -> str:
     from .term import strip
-    p = store.root / "logs" / f"{step_id}.log"
+    p = store.root / "logs" / f"{step_id.replace('/', '.')}.log"   # an inner step's file id
     try:
         data = strip(p.read_bytes()).decode(errors="replace").replace("\r", "")
     except FileNotFoundError:
@@ -443,7 +443,7 @@ def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Sto
                 out += [f"> {_md(s.detail)}", ""]
             tail = _log_tail(store, s.id) if store is not None else ""
             if tail:
-                out += [f"Last lines of `logs/{s.id}.log`:", "", "```text", tail, "```", ""]
+                out += [f"Last lines of `logs/{s.id.replace('/', '.')}.log`:", "", "```text", tail, "```", ""]
     out.append(f"_Built from the journal by testrunner ({len(runs)} run(s) in it)._")
     return "\n".join(out) + "\n"
 
