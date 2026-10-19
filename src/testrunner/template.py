@@ -127,6 +127,8 @@ async def render_str(text: str, resolve: Resolve, escape: Callable[[str], str] |
     parts = _parse(text)
     if len(parts) == 1 and parts[0][0] == "ref":
         (_, value), = await _parts(parts, resolve, escape)
+        if escape is not None and value is not None and not isinstance(value, (list, dict)):
+            return escape(str(value))     # a pattern that IS one value: still that value, literally
         return value
     out = []
     for is_ref, v in await _parts(parts, resolve, escape):

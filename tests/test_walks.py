@@ -151,7 +151,7 @@ def test_negative_control_an_acceptance_is_not_a_refusal(s, capsys):
 
 def test_a_param_in_an_output_pattern_is_matched_literally(s, capsys):
     # "." in the URL must not match any character: the substituted value is re.escape'd
-    walks = REFUSE.replace('{param.url}\'; exit', 'httpXtangXinvalid\'; exit')
+    walks = REFUSE.replace('{param.url}\'; exit', 'http://tangXinvalid\'; exit')
     code, out, ev, trail = go(s, capsys, walks, "provoke")
     assert code != 0
     assert ends(ev)[0] == ("provoke/try", "failed")
@@ -422,6 +422,7 @@ def test_template_whole_string_keeps_the_type_and_text_joins():
     assert r("{{literal}} {a}", {"a": "v"}) == "{literal} v"
     assert r("{f:{a}.x}", {"a": "h1", "f": lambda arg: arg.upper()}) == "H1.X"
     assert r("^{a}$", {"a": "a.b"}, escape=__import__("re").escape) == r"^a\.b$"
+    assert r("{a}", {"a": "a.b"}, escape=__import__("re").escape) == r"a\.b"
     assert r({"k": ["{a}"]}, {"a": "v"}) == {"k": ["v"]}
 
 
