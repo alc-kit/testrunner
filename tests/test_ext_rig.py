@@ -213,6 +213,51 @@ def test_validation_speaks_the_rigs_terms(rig_root, edit, msg):
     assert r.returncode == 1 and msg in r.stderr, r.stderr
 
 
+BARE = {"machines": ["hub", "n1", "n2"], "set": {"n1": {"disks": 0, "size": 0},
+                                                  "n2": {"disks": 0, "size": 0, "mem": 2048}}}
+
+
+def write_catalogue(rig_root, edit):
+    import yaml
+    data = yaml.safe_load(CATALOGUE)
+    edit(data)
+    (rig_root / "lifecycle" / "nodes.yml").write_text(yaml.safe_dump(data, sort_keys=False))
+
+
+def test_a_scenario_sets_its_machines_fields(rig_root):
+    """The mapping form: members plus the fields this shape gives them; json --scenario reports
+    them, json --all and the other scenarios the machines' own."""
+    write_catalogue(rig_root, lambda d: d["scenarios"].update(bare=BARE))
+    assert tool(rig_root, "nodes", "validate").returncode == 0
+    assert tool(rig_root, "nodes", "list", "--scenario", "bare").stdout.split() == ["hub", "n1", "n2"]
+
+    def table(*args):
+        r = tool(rig_root, "nodes", "json", *args)
+        assert r.returncode == 0, r.stderr
+        return {m["name"]: m for m in json.loads(r.stdout)["machines"]}
+    bare = table("--scenario", "bare")
+    assert [(bare[n]["disks"], bare[n]["size"], bare[n]["mem"]) for n in ("n1", "n2")] == [(0, 0, 1024), (0, 0, 2048)]
+    assert bare["n1"]["ip"] == "192.0.2.51"                              # the rest is the machine's
+    for args in (("--all",), ("--scenario", "pair")):
+        assert (table(*args)["n1"]["disks"], table(*args)["n2"]["mem"]) == (2, 1024)
+
+
+@pytest.mark.parametrize("body,msg", [
+    ({"machines": ["n1"], "colour": "red"}, "scenarios.bare: unknown key(s) colour"),
+    ({"set": {}}, "scenarios.bare must be a non-empty list of machines"),
+    ({"machines": ["n1"], "set": ["n1"]}, "scenarios.bare.set must map machines"),
+    ({"machines": ["n1"], "set": {"n2": {"mem": 2048}}}, "scenarios.bare.set names n2, which is not in the scenario"),
+    ({"machines": ["n1"], "set": {"n1": {"ip": "192.0.2.99"}}}, "scenarios.bare.set.n1 may set only mem, cpu"),
+    ({"machines": ["n1"], "set": {"n1": {"mem": 0}}}, "scenarios.bare.set.n1.mem must be an integer >= 1"),
+    ({"machines": ["n1"], "set": {"n1": {"disks": True}}}, "scenarios.bare.set.n1.disks must be an integer >= 0"),
+    ({"machines": ["n1"], "set": {"n1": {"disks": 0}}}, "scenarios.bare.set.n1: size must be 0 exactly when disks is 0"),
+])
+def test_a_bad_scenario_set_is_refused(rig_root, body, msg):
+    write_catalogue(rig_root, lambda d: d["scenarios"].update(bare=body))
+    r = tool(rig_root, "nodes", "validate")
+    assert r.returncode == 1 and msg in r.stderr, r.stderr
+
+
 def test_the_inventory_check_is_off_unless_configured(rig_root):
     import yaml
     data = yaml.safe_load(CATALOGUE)
