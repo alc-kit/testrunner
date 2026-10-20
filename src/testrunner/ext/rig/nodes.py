@@ -40,6 +40,11 @@ THE FORMAT (top-level keys of the catalogue; every other key is left alone):
       ...        any other key is carried through untouched (e.g. a rig's own flags)
   roles:               <role>: <machine> | [<machine>, ...]: cluster nodes only
   scenarios:           <name>: [<machine>, ...] — optional; absent = one scenario, all machines
+                       <name>: {machines: [<machine>, ...], set: {<machine>: {<field>: <int>}}}
+                         — the same, and in THIS scenario those machines' mem/cpu/disks/size
+                         are the values given (e.g. a shape whose nodes have no data disks);
+                         `json --scenario` reports them, `json --all` the machines' own.
+                         A machine's `overrides:` still win over them at creation.
   default_scenario:    <name> — required when scenarios is given
 
 Optionally (ext.rig.inventory: {group, conditional, v6_var}), during a move to the
@@ -56,6 +61,7 @@ import yaml
 
 FIELDS = ("kind", "ip", "ip6", "mem", "cpu", "disks", "size", "late", "optional", "overrides")
 OVERRIDABLE = ("mem", "cpu", "size")
+SETTABLE = ("mem", "cpu", "disks", "size")       # what a scenario may set on its machines
 
 
 def die(msg, code=2):
@@ -154,7 +160,12 @@ def problems(data, st):
         if not isinstance(scenarios, dict) or not scenarios:
             bad.append("scenarios must be a non-empty mapping")
         else:
-            for sc, members in scenarios.items():
+            for sc, body in scenarios.items():
+                if isinstance(body, dict) and set(body) - {"machines", "set"}:
+                    bad.append("scenarios.%s: unknown key(s) %s (want machines, set)"
+                               % (sc, ", ".join(sorted(map(str, set(body) - {"machines", "set"})))))
+                    continue
+                members, sets = scenario_body(body)
                 if not isinstance(members, list) or not members:
                     bad.append("scenarios.%s must be a non-empty list of machines" % sc)
                     continue
@@ -163,6 +174,25 @@ def problems(data, st):
                         bad.append("scenarios.%s names %s, which is not a machine" % (sc, n))
                 if len(set(members)) != len(members):
                     bad.append("scenarios.%s lists a machine twice" % sc)
+                if not isinstance(sets, dict):
+                    bad.append("scenarios.%s.set must map machines to {%s: <int>}" % (sc, "|".join(SETTABLE)))
+                    continue
+                for n, fields in sets.items():
+                    if n not in members:
+                        bad.append("scenarios.%s.set names %s, which is not in the scenario" % (sc, n))
+                        continue
+                    if not isinstance(fields, dict) or not fields or any(k not in SETTABLE for k in fields):
+                        bad.append("scenarios.%s.set.%s may set only %s" % (sc, n, ", ".join(SETTABLE)))
+                        continue
+                    for k, v in fields.items():
+                        low = 0 if k in ("disks", "size") else 1
+                        if not isinstance(v, int) or isinstance(v, bool) or v < low:
+                            bad.append("scenarios.%s.set.%s.%s must be an integer >= %d (got %r)" % (sc, n, k, low, v))
+                    m = {**(machines.get(n) or {}), **fields}
+                    if isinstance(m.get("disks"), int) and isinstance(m.get("size"), int) \
+                            and (m["disks"] == 0) != (m["size"] == 0):
+                        bad.append("scenarios.%s.set.%s: size must be 0 exactly when disks is 0 (disks=%d size=%d)"
+                                   % (sc, n, m["disks"], m["size"]))
             if data.get("default_scenario") not in scenarios:
                 bad.append("default_scenario must name one of the scenarios (got %r)" % data.get("default_scenario"))
     elif "default_scenario" in data:
@@ -201,18 +231,39 @@ def checked(data, st):
     return data
 
 
-def scenario_members(data, scenario):
-    machines = data["machines"]
+def scenario_body(body):
+    """(members, set) of one scenario: a list is its members; a mapping {machines, set}."""
+    if isinstance(body, dict):
+        return body.get("machines"), body.get("set") or {}
+    return body, {}
+
+
+def scenario_name(data, scenario):
     scenarios = data.get("scenarios")
     if scenarios is None:
         if scenario:
             die("no scenarios are defined, so --scenario %s means nothing" % scenario)
-        return list(machines)
+        return None
     name = scenario or data["default_scenario"]
     if name not in scenarios:
         die("unknown scenario %r (scenarios: %s)" % (name, ", ".join(scenarios)))
-    members = set(scenarios[name])
+    return name
+
+
+def scenario_members(data, scenario):
+    machines = data["machines"]
+    name = scenario_name(data, scenario)
+    if name is None:
+        return list(machines)
+    members = set(scenario_body(data["scenarios"][name])[0])
     return [n for n in machines if n in members]          # creation order, always
+
+
+def scenario_machines(data, scenario):
+    """{name: spec} of the scenario's machines, in creation order, with its `set:` applied."""
+    name = scenario_name(data, scenario)
+    sets = scenario_body(data["scenarios"][name])[1] if name is not None else {}
+    return {n: {**data["machines"][n], **sets.get(n, {})} for n in scenario_members(data, scenario)}
 
 
 def cmd_list(data, args, st):
@@ -360,8 +411,8 @@ def main(argv=None):
             every = True                    # every machine, whatever the scenario (the inventory)
         elif args:
             die("json: unexpected argument(s) %s" % " ".join(args))
-        names = list(machines) if every else scenario_members(data, scenario)
-        print(json.dumps({"machines": [dict(name=n, **machines[n]) for n in names],
+        table = machines if every else scenario_machines(data, scenario)
+        print(json.dumps({"machines": [dict(name=n, **spec) for n, spec in table.items()],
                           "roles": data.get("roles") or {}}, indent=2))
     else:
         die("unknown command %r" % cmd)
