@@ -181,15 +181,77 @@ edit:
     id: ping-after-join          #   optional; default ping#2
   - insert: [{action: membership, id: members-after-qdevice}]
     after: qdevice
+  - insert: [pve-ping]           # an action this config defines (below)
+    between: [join, golden-build]
   - skip: [cache-verify]         # one id or a list
   - replace: images              # one step out, these in, at its place
     by: [{action: images, with: {source: mirror}}]
+  - extend: golden-build         # one step's walk action, for this walk only (below)
+    steps:
+      - {id: preflight, action: pve-ping, before: build}
 ```
 A later edit may anchor on an id an earlier one made, and `on:`/`expect:` may name it. In a
 config every name must be on the walk (an error otherwise); with steps given on the command line
 an edit whose anchor is not in the run is dropped with a note. The edits are part of the step
 source in `--plan`, the banner, the journal and the report:
 `steps: plan of qdevice.yml (via x.yml); edits: +ping-after-join (again ping) after join, -cache-verify`.
+
+**Placement.** `repeat:` and `insert:` take exactly one of:
+
+| key | the new steps land | refused when |
+|---|---|---|
+| `after: <id>` | right after `<id>` | `<id>` is not on the walk |
+| `before: <id>` | right before `<id>` | `<id>` is not on the walk |
+| `between: [<a>, <b>]` | right before `<b>` | either id is not on the walk, or `<a>` does not come earlier than `<b>` |
+
+`between:` does not need `<a>` and `<b>` to be neighbours: on `join, images, golden-build` the
+step lands after `images`, right before `golden-build`. `<a>` is a check, not an anchor: it
+states what you expect the walk to look like, so an inherited walk that has since been
+reordered refuses the edit instead of silently placing the step somewhere else. The command
+line's `--repeat`/`--insert` take `@after:` and `@before:` only.
+
+**Extending one step.** `extend: <id>` with `steps:` changes the WALK action behind that step,
+for this walk only; the repository's walk and every other step that uses it are untouched. The
+inner steps follow the walk-action rules (below), by id:
+- an inner step whose `id` the walk already has is MERGED into it, as a walk action's
+  `extends:` merges: maps merged, lists and scalars replaced, a different kind key (`action:`,
+  `playbook:`, ...) replaces the old one,
+- a new `id` is appended at the end, or placed by one of `after:`, `before:` or
+  `between: [<a>, <b>]`, which name inner ids of that walk, with the same rules as above,
+- `after:`/`before:`/`between:` on an existing id is refused (move a step with `skip` +
+  `insert`, not by merging).
+
+The step keeps its id (`--from golden-build`, `on:` and `expect:` still name it); its action
+becomes `<action>+<id>` (`golden-build+golden-build`) and its inner steps are named
+`golden-build/preflight` as usual. `--plan` says `extended golden-build (1 inner step(s))`.
+Extending a Python or shell action is refused: change its parameters with `replace` and
+`with:`.
+
+**Actions in a run config.** A run config may define walk actions of its own (`actions:`, the
+same schema as `actions/*.yml`, below) and take another config's (`uses:`), so an edit can
+insert a step the repository does not have:
+```yaml
+extends: p3-serial
+uses: [checks]                   # checks.yml's actions: ONLY (not its plan, rig or edits)
+actions:
+  pve-ping:
+    doc: every PVE node answers, before the golden image is built
+    steps:
+      - {id: ping, action: ping}
+edit:
+  - {insert: [pve-ping], between: [join, golden-build]}
+```
+- `actions:` are inherited through `extends:`; `uses:` configs are read in order. When two
+  define the same name, the later one wins and the run says so (`action 'pve-ping': child.yml
+  (own) replaces parent.yml`): the parent's first, then each `uses:` config, then the config's
+  own.
+- A config action may `extends:` a repository walk. It may not take a name the repository
+  already uses, for a Python action or a walk alike (one name, one action): give it a new
+  name.
+- A config named in `uses:` or `extends:` is looked up beside the config, then in the configs
+  directory; one that does not exist, or a loop, is refused.
+- The actions are part of the config, so a run that joins a scenario from its snapshot has them
+  too.
 
 **Retry, on evidence.** A step can be retried, as a walk edit or as `retry:` on the step in a
 path. It is retried only when the evidence says a retry can help:
@@ -252,6 +314,8 @@ ignored or made to fail the walk, decided by the outcome and the state the runne
 reached. Use a walk for COMPOSITION (run this playbook, then that one, on these hosts); keep
 Python for questions and procedures that need logic (a probe that answers `member` /
 `not-member`, a sweep of leftover machines).
+
+A run config can define walks too (`actions:`, `uses:`; "Actions in a run config" above).
 
 ```yaml
 # testrunner.yml: action_files: [actions/*.yml]      (or walks in its own `actions:`)

@@ -339,7 +339,7 @@ def collect_actions(rc: RunnerConfig, file: Path, chain: tuple[Path, ...] = ()) 
 def _edits(path: Path, data: dict) -> list:
     e = data.get("edit") or []
     if not isinstance(e, list):
-        raise ConfigError(f"{path}: edit: want a list of edits (repeat/insert/skip/replace)")
+        raise ConfigError(f"{path}: edit: want a list of edits (repeat/insert/skip/replace/extend/retry/transition)")
     return copy.deepcopy(e)
 
 

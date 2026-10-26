@@ -11,8 +11,10 @@ A config (configs/<name>.yml) describes a run in parts, each a mapping:
   run:      per-step settings, the defaults of every plan step.
   plan:     what `./run.sh` with no stage arguments runs: an ordered list of
             {stages: [...] | "a..b", with: {<run key>: value}}.
-  edit:     testrunner's walk edits (repeat/insert/skip/replace/retry), checked there; here
-            only their shape and the `with` of the steps they add (run keys).
+  edit:     testrunner's walk edits (repeat/insert/skip/replace/extend/retry/transition),
+            checked there; here only their shape and the `with` of the steps they add (run keys).
+  actions:  walk actions the config defines, and
+  uses:     configs whose actions it takes (testrunner's, checked there).
 `extends: <name>` lays a config over another (chains allowed, cycles refused;
 mappings merge key by key, `plan` is replaced whole, `edit` accumulates, parent first). configs/default.yml holds EVERY
 key. Machine-specific settings go in a gitignored configs/local/<name>.yml that
