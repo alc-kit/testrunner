@@ -232,6 +232,18 @@ class RunConfig:
     scenario: str = ""
     # the file that STATES the plan: an ancestor when the plan is inherited through `extends:`
     plan_file: Path | None = None
+    # the walk actions this config defines (`actions:`, inherited through `extends:`, imported
+    # with `uses:`): name -> (spec, where); and what overrode what, for --plan and the banner
+    actions: dict[str, tuple[dict, str]] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+    def walk_actions(self) -> dict[str, tuple[dict, str]]:
+        """The config's walk actions — from the files, or (a joined scenario's snapshot) from
+        the data the scenario recorded."""
+        if self.actions:
+            return self.actions
+        where = self.file.name if self.file else "scenario snapshot"
+        return {n: (s, where) for n, s in (self.data.get("actions") or {}).items()}
 
     @property
     def plan(self) -> Any:
@@ -279,6 +291,51 @@ def resolve_config_file(rc: RunnerConfig, name: str | None) -> tuple[Path | None
     return None, "none"
 
 
+def _find_config(rc: RunnerConfig, near: Path, name: str, key: str) -> Path:
+    """`extends:` / `uses:` NAME: beside the file that names it, then in the configs dir."""
+    for d in (near.parent, rc.configs_dir):
+        for ext in ("", *EXTENSIONS):
+            c = d / f"{name}{ext}"
+            if c.is_file():
+                return c
+    raise ConfigError(f"{near}: {key} {name!r}, which does not exist")
+
+
+def collect_actions(rc: RunnerConfig, file: Path, chain: tuple[Path, ...] = ()) -> tuple[dict[str, tuple[dict, str]], list[str]]:
+    """A run config's WALK ACTIONS: its parent's (`extends:`), then each `uses:` config's (in
+    order; its actions only — not its plan, rig or edits), then its own `actions:`. A later
+    definition of a name replaces an earlier one, and says so in the notes."""
+    file = file.resolve()
+    if file in chain:
+        raise ConfigError("extends/uses loop: " + " -> ".join(p.name for p in (*chain, file)))
+    data = load_file(file)
+    acts: dict[str, tuple[dict, str]] = {}
+    notes: list[str] = []
+
+    def put(more: dict[str, tuple[dict, str]], how: str) -> None:
+        for n, (spec, where) in more.items():
+            if n in acts and acts[n][1] != where:
+                notes.append(f"action {n!r}: {where} ({how}) replaces {acts[n][1]}")
+            acts[n] = (spec, where)
+
+    if data.get("extends") is not None:
+        a, n = collect_actions(rc, _find_config(rc, file, str(data["extends"]), "extends"), (*chain, file))
+        notes += n
+        put(a, "inherited")
+    uses = data.get("uses") or []
+    if not isinstance(uses, list) or not all(isinstance(u, str) and u for u in uses):
+        raise ConfigError(f"{file}: uses: want a list of run config names")
+    for u in uses:
+        a, n = collect_actions(rc, _find_config(rc, file, u, "uses"), (*chain, file))
+        notes += n
+        put(a, f"uses {u}")
+    own = data.get("actions") or {}
+    if not isinstance(own, dict):
+        raise ConfigError(f"{file}: actions: want a mapping of name -> walk action (steps:)")
+    put({n: (spec, file.name) for n, spec in own.items()}, "own")
+    return acts, notes
+
+
 def _edits(path: Path, data: dict) -> list:
     e = data.get("edit") or []
     if not isinstance(e, list):
@@ -300,6 +357,8 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
             raise ConfigError(f"extends loop: {chain}")
         seen.append(p)
         data = load_file(p)
+        data.pop("uses", None)          # actions only: collected by collect_actions()
+        data.pop("actions", None)
         parent = data.pop("extends", None)
         if parent is None:
             if "plan" in data:
@@ -341,8 +400,15 @@ def load_run_config(rc: RunnerConfig, name: str | None = None) -> RunConfig:
     plan_file = plan_from[-1] if plan_from else None
     if plan_file is not None and plan_file != file.resolve():
         log.info("its plan is inherited from %s", plan_file)
+    actions, notes = collect_actions(rc, file)
+    if actions:
+        # in the data too: a scenario records the data, and a run that joins it has no files to read
+        data["actions"] = {n: copy.deepcopy(spec) for n, (spec, _) in actions.items()}
+        log.info("run config actions: %s", {n: w for n, (_, w) in actions.items()})
+    for n in notes:
+        log.info("run config: %s", n)
     return RunConfig(file, how, apply_config_hooks(rc, data, how, file, nolog_paths), nolog_paths,
-                     plan_file=plan_file)
+                     plan_file=plan_file, actions=actions, notes=notes)
 
 
 def _leaves(data: Any, prefix: str = "") -> dict[str, Any]:

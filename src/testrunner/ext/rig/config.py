@@ -138,7 +138,9 @@ def load(path, schema, chain=()):
     if path in chain:
         die("extends cycle: %s" % " -> ".join(chain + (path,)))
     data = load_yaml(path)
-    top = set(schema["sections"]) | {"extends", "plan", "edit"}
+    # actions/uses: walk actions the run config defines or imports (testrunner's own loader
+    # collects them); this loader only has to let them through
+    top = set(schema["sections"]) | {"extends", "plan", "edit", "actions", "uses"}
     unknown = sorted(set(data) - top)
     if unknown:
         die("%s: unknown top-level key(s) %s (known: %s)" % (path, ", ".join(unknown), ", ".join(sorted(top))))
