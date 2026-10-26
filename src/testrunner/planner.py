@@ -543,7 +543,7 @@ class Compiler:
         if edits is None:
             return []
         if not isinstance(edits, list):
-            raise ConfigError("edit: want a list of edits (repeat/insert/skip/replace)")
+            raise ConfigError("edit: want a list of edits (repeat/insert/skip/replace/extend/retry/transition)")
         done: list[str] = []
         for i, ed in enumerate(edits):
             where = f"{label}[{i}]"

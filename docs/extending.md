@@ -27,7 +27,7 @@ subscriber's `state_dir`. A subscriber pulls testrunner in as a git subtree and 
 | give steps something they NEED (a client, a connection, credentials) | **fixture** | `@fixture(scope="run"\|"step")`; set up on first use, torn down at the scope's end, also after a failure |
 | READ what the system IS (power, version, membership) | **observer** | `@observer("<state var>")`; asked before the plan is judged, at run start, after every state-changing step |
 | act AROUND steps (refuse a run, adjust the config, record metrics) | **hook** | `@hook("run_config"\|"run_start"\|"step_start"\|"step_end"\|"run_end")` |
-| run one thing in several orders, with other parameters | **run config** | `configs/<name>.yml`: `extends:`, `plan:`, `edit:`, parameters |
+| run one thing in several orders, with other parameters | **run config** | `configs/<name>.yml`: `extends:`, `plan:`, `edit:`, `actions:`, `uses:`, parameters |
 | share any of the above between frameworks | **extension** | a package; settings under `ext: {<name>: ...}` (below) |
 
 An action's contract is declared, not coded: `requires` (the states it may start from),
@@ -66,6 +66,9 @@ extends: qdevice                     # inherit a whole plan
 edit:
   - {repeat: ping, after: join}      # run a step again later
   - {insert: [membership], after: qdevice}
+  - {insert: [pve-ping], between: [join, golden-build]}   # an action the config defines
+  - extend: golden-build             # add an inner step to one step's walk, for this walk only
+    steps: [{id: preflight, action: pve-ping, before: build}]
   - {skip: [alma]}
   - retry: install                   # retry, only when the evidence says it can help
     times: 2
@@ -75,6 +78,10 @@ edit:
       - {when: {outcome: passed, state: {rig: clustered}}, then: continue}
       - {when: {outcome: passed, state: {rig: installed}}, then: {goto: form}}
 ```
+`pve-ping` above is not in the repository: a config may define walk actions (`actions:`) or
+take another config's (`uses: [checks]`). The README's "Editing a walk" has the placement rules
+(`after:`/`before:`/`between:`) and what `extend:` merges.
+
 A negative control is an `expect` in the plan: `expect: {verify: {outcome: failed}}` passes the run
 only if `verify` fails.
 
