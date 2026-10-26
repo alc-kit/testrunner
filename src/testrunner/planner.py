@@ -18,8 +18,15 @@ Walk edits (the run config's `edit:` list, accumulated through `extends:`), appl
 to the compiled main path, each anchored on a step id:
   {repeat: ping, after: join, id: ping-after-join}   the step again: same action/with/when
   {insert: [steps...], after|before: <id>}           new steps
+  {insert: [steps...], between: [<a>, <b>]}          new steps right BEFORE b; refused unless a
+                                                     comes earlier on the walk (also on repeat:)
   {skip: <id> | [<id>...]}                           dropped from the walk
   {replace: <id>, by: [steps...]}                    one step out, these in, at its place
+  {extend: <id>, steps: [inner steps...]}            that step's WALK action, for this walk only:
+                                                     an inner step with an existing id is merged
+                                                     into it; a new one is appended, or placed by
+                                                     after:/before:/between: among the inner ids.
+                                                     The step keeps its id.
   {retry: <id>, times: N, delay: S, if: {...}, unless: {...}}   retry it, on evidence (below)
 
 Retry (a walk edit, or `retry:` on a step in a path): after an attempt that did NOT end as the
@@ -59,8 +66,8 @@ log = logging.getLogger(__name__)
 MAIN = "main"
 REACTION_WORDS = ("continue", "stop")
 WALK_WORDS = ("fail", "ignore", "skip")          # reactions only a walk action's steps may have
-EDIT_OPS = {"repeat": {"after", "before", "id"}, "insert": {"after", "before"}, "skip": set(), "replace": {"by"},
-            "retry": {"times", "delay", "if", "unless"}, "transition": {"rules"}}
+EDIT_OPS = {"repeat": {"after", "before", "between", "id"}, "insert": {"after", "before", "between"}, "skip": set(), "replace": {"by"},
+            "retry": {"times", "delay", "if", "unless"}, "transition": {"rules"}, "extend": {"steps"}}
 RETRY_KEYS = {"times", "delay", "if", "unless"}
 EVIDENCE_KEYS = {"outcome", "detail", "output", "state", "probe"}
 DEFAULT_RETRY_ON = ["failed", "errored"]
@@ -550,14 +557,19 @@ class Compiler:
             if extra:
                 raise ConfigError(f"{where}: {op} takes {', '.join(sorted(EDIT_OPS[op])) or 'no other key'}, "
                                   f"not {', '.join(sorted(map(str, extra)))}")
-            if op in ("repeat", "insert") and len({"after", "before"} & set(ed)) != 1:
-                raise ConfigError(f"{where}: {op} needs exactly one of after: or before: <step id>")
+            if op in ("repeat", "insert") and len({"after", "before", "between"} & set(ed)) != 1:
+                raise ConfigError(f"{where}: {op} needs exactly one of after:, before: or between: "
+                                  f"(<step id>, <step id>, [<step id>, <step id>])")
+            if "between" in ed and not (isinstance(ed["between"], list) and len(ed["between"]) == 2
+                                        and all(isinstance(x, str) and x for x in ed["between"])):
+                raise ConfigError(f"{where}: between: want [<step id>, <step id>], got {ed['between']!r}")
             if op == "replace" and "by" not in ed:
                 raise ConfigError(f"{where}: replace needs by: [steps...]")
 
             targets = [ed[op]] if op != "skip" or not isinstance(ed[op], list) else ed[op]
             if any(isinstance(t, str) and "/" in t for t in targets) or any(
-                    isinstance(ed.get(k), str) and "/" in ed[k] for k in ("after", "before")):
+                    isinstance(ed.get(k), str) and "/" in ed[k] for k in ("after", "before")) or any(
+                    "/" in x for x in (ed.get("between") or [])):
                 if op not in ("retry", "skip"):
                     raise ConfigError(f"{where}: {op} cannot reach inside a walk action; an inner step "
                                       f"(walk/step) can only be retried or skipped")
@@ -594,7 +606,21 @@ class Compiler:
                 return idx
 
             if op in ("repeat", "insert"):
-                anchor = ed.get("after") or ed.get("before")
+                # between: [a, b] — placed right before b, and only where a really precedes b:
+                # the edit states its intent, and refuses when the walk no longer matches it
+                lo = ed["between"][0] if "between" in ed else None
+                anchor = ed["between"][1] if "between" in ed else (ed.get("after") or ed.get("before"))
+                if lo is not None:
+                    ia, ib = at(lo, "anchor"), at(anchor, "anchor")
+                    if ia is None or ib is None:
+                        continue
+                    if ia >= ib:
+                        msg = (f"{where}: {op} between [{lo}, {anchor}]: {lo!r} does not come before {anchor!r} "
+                               f"on the walk ({', '.join(s.id for s in main)})")
+                        if not adhoc:
+                            raise ConfigError(msg)
+                        notes.append(msg + " — dropped")
+                        continue
                 if op == "repeat":
                     src = at(ed["repeat"], "step")
                     if src is None or at(anchor, "anchor") is None:
@@ -609,9 +635,21 @@ class Compiler:
                 idx = at(anchor, "anchor")       # where it is NOW (after any earlier edit)
                 pos = idx + 1 if "after" in ed else idx
                 main[pos:pos] = new
-                rel = "after" if "after" in ed else "before"
+                rel = "after" if "after" in ed else ("between " + lo + " and" if lo is not None else "before")
                 done += [f"+{n.id}" + (f" (again {ed['repeat']})" if op == "repeat" else "") + f" {rel} {anchor}"
                          for n in new]
+            elif op == "extend":
+                if "steps" not in ed:
+                    raise ConfigError(f"{where}: extend needs steps: [inner steps...]")
+                idx = at(ed["extend"], "step")
+                if idx is None:
+                    continue
+                st = main[idx]
+                from . import walks
+                variant = f"{st.action}+{st.id}"
+                walks.derive_extended(self.reg, self.rc, st.action, variant, ed["steps"], where)
+                st.action = variant
+                done.append(f"extended {st.id} ({len(ed['steps'])} inner step(s))")
             elif op == "transition":
                 if "rules" not in ed:
                     raise ConfigError(f"{where}: transition needs rules: [{{when: ..., then: ...}}, ...]")

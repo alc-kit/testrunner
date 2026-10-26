@@ -115,6 +115,15 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def use_config_actions(reg, rc, run_config, style) -> None:
+    """Register the run config's own walk actions (`actions:`, `uses:`) before its plan compiles,
+    and say what replaced what."""
+    from . import walks
+    walks.build_config(reg, rc, run_config.walk_actions())
+    for n in run_config.notes:
+        print(style.dim(f"note: {n}"))
+
+
 def cli_edits(args: argparse.Namespace) -> list[dict]:
     """The one-run walk edits, as `edit:` entries (applied after the config's)."""
     out: list[dict] = []
@@ -272,6 +281,7 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
             log.info("--with for this run: %s", with_)
         sel = select(rc, store, args.config, claim=False, run_id=run_id)
         logs.secrets = Secrets(values_at(sel.run_config.data, sel.run_config.nolog_paths))
+        use_config_actions(reg, rc, sel.run_config, style)
         edits_now = cli_edits(args)
         start_at = resume_point(store) if args.resume else args.from_
         if args.resume:
@@ -297,6 +307,7 @@ def _main(args: argparse.Namespace, style: Style, logs: Logs) -> int:
             if not sel.claimed:    # a parallel runner selected first: compile against ITS config
                 log.warning("a parallel runner selected the scenario first; recompiling against %s",
                             describe(sel.scenario))
+                use_config_actions(reg, rc, sel.run_config, style)
                 prog = compiler.compile(sel.run_config.plan, args.steps or None, with_, sel.run_config.plan_of,
                                         sel.run_config.data.get("edit"), edits_now, start_at)
         elif sel.scenario is None:

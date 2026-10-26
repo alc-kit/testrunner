@@ -205,7 +205,113 @@ def build(reg: Registry, rc: RunnerConfig) -> None:
             raise ConfigError(f"action {name!r} is both a walk ({raw[name][1]}) and {reg.actions[name].kind} "
                               f"({reg.actions[name].source}): one name, one action")
     kinds = set(CORE_KINDS) | set(reg.step_kinds)
-    specs = _resolve_extends(raw, kinds)
+    _register(reg, rc, _resolve_extends(raw, kinds), kinds)
+
+
+CONFIG_SOURCE = "run config"     # the source of an action a run config defines: replaced, never shadowed
+
+
+def _unregister(reg: Registry, name: str) -> None:
+    """Drop an action and its inner steps (a config action or an `extend:` variant, re-registered)."""
+    for n in [n for n in reg.actions if n == name or n.startswith(name + "/")]:
+        del reg.actions[n]
+
+
+def _known_walks(reg: Registry) -> dict[str, tuple[dict, str]]:
+    """The walks already registered, as resolved specs — what a later walk may `extends:`."""
+    return {n: (a.walk.raw, a.walk.source) for n, a in reg.actions.items() if a.kind == "walk" and a.walk is not None}
+
+
+def build_config(reg: Registry, rc: RunnerConfig, actions: dict[str, tuple[dict, str]]) -> None:
+    """Register the walk actions a RUN CONFIG defines (its `actions:`, inherited through
+    `extends:`, imported with `uses:`). They may `extends:` any registered walk. A name the
+    repository already defines is refused — one name, one action; a config action from an
+    earlier selection is replaced (a recompile against another config)."""
+    for n in [n for n, a in reg.actions.items() if a.kind == "walk" and a.source.startswith(CONFIG_SOURCE)]:
+        _unregister(reg, n)
+    if not actions:
+        return
+    for name, (spec, where) in actions.items():
+        if name in reg.actions:
+            raise ConfigError(f"{where}: action {name!r} is already defined by the repository "
+                              f"({reg.actions[name].source}): a run config adds actions, it does not shadow "
+                              f"one — give it another name, or `extends: {name}` under a new one")
+        if not isinstance(spec, dict) or ("steps" not in spec and "extends" not in spec):
+            raise ConfigError(f"{where}: a run config's action is a walk action (steps:, or extends:)")
+    kinds = set(CORE_KINDS) | set(reg.step_kinds)
+    raw = {**_known_walks(reg), **{n: (_norm_on(s), f"{CONFIG_SOURCE} {w}") for n, (s, w) in actions.items()}}
+    resolved = _resolve_extends(raw, kinds)
+    _register(reg, rc, {n: resolved[n] for n in actions}, kinds)
+
+
+POSITION_KEYS = ("after", "before", "between")
+
+
+def derive_extended(reg: Registry, rc: RunnerConfig, base: str, name: str, steps: Any, where: str) -> None:
+    """The `extend: <step>` walk edit: `name` = walk action `base` with `steps` applied — a
+    step whose id `base` has is merged into it (maps merged, lists and scalars replaced, a new
+    kind replaces the old); a new step is appended, or placed by `after:`, `before:` or
+    `between: [a, b]` (right before b; a must come earlier) among the inner step ids."""
+    if base not in reg.actions or reg.actions[base].kind != "walk" or reg.actions[base].walk is None:
+        kind = reg.actions[base].kind if base in reg.actions else "unknown"
+        raise ConfigError(f"{where}: extend: {base!r} is a {kind} action, not a walk action — only a walk's "
+                          f"inner steps can be extended (change a python/shell action with replace: and with:)")
+    if not isinstance(steps, list) or not steps:
+        raise ConfigError(f"{where}: extend needs steps: [inner steps...]")
+    kinds = set(CORE_KINDS) | set(reg.step_kinds)
+    spec = copy.deepcopy(reg.actions[base].walk.raw)
+    spec.pop("extends", None)
+    cur = [_norm_on(dict(st)) for st in spec["steps"]]
+    ids = _default_ids(cur, kinds, where)
+    for i, st in enumerate(steps):
+        sw = f"{where}.steps[{i}]"
+        if not isinstance(st, dict):
+            raise ConfigError(f"{sw}: want a mapping (an inner step)")
+        st = _norm_on(copy.deepcopy(st))
+        pos = {k: st.pop(k) for k in POSITION_KEYS if k in st}
+        if len(pos) > 1:
+            raise ConfigError(f"{sw}: give one of after:, before:, between:, not {', '.join(pos)}")
+        sid = str(st["id"]) if "id" in st else None
+        if sid is not None and sid in ids:
+            if pos:
+                raise ConfigError(f"{sw}: {sid!r} is already an inner step of {base}: it is merged in place; "
+                                  f"after:/before:/between: place NEW steps only")
+            idx = ids.index(sid)
+            old = cur[idx]
+            if any(k in kinds for k in st):
+                old = {k: v for k, v in old.items() if k not in kinds}
+            cur[idx] = deep_merge(old, st)
+            cur[idx]["id"] = sid
+            continue
+        def at(x: Any) -> int:
+            if not isinstance(x, str) or x not in ids:
+                raise ConfigError(f"{sw}: {x!r} is not an inner step of {base} (its steps: {', '.join(ids)})")
+            return ids.index(x)
+        if not pos:
+            idx = len(cur)
+        elif "after" in pos:
+            idx = at(pos["after"]) + 1
+        elif "before" in pos:
+            idx = at(pos["before"])
+        else:
+            b = pos["between"]
+            if not (isinstance(b, list) and len(b) == 2):
+                raise ConfigError(f"{sw}: between: want [<inner step id>, <inner step id>], got {b!r}")
+            lo, hi = at(b[0]), at(b[1])
+            if lo >= hi:
+                raise ConfigError(f"{sw}: between {b}: {b[0]!r} does not come before {b[1]!r} in {base} "
+                                  f"({', '.join(ids)})")
+            idx = hi
+        cur.insert(idx, st)
+        ids = _default_ids(cur, kinds, where)
+    spec["steps"] = cur
+    _unregister(reg, name)
+    _register(reg, rc, {name: (spec, where)}, kinds)
+    log.info("%s: extend %s -> %s: inner steps %s", where, base, name, ids)
+
+
+def _register(reg: Registry, rc: RunnerConfig, specs: dict[str, tuple[dict, str]], kinds: set[str]) -> None:
+    """Register resolved walk specs (no `extends:` left), compile them, derive their contracts."""
     walks: dict[str, WalkSpec] = {}
     for name, (spec, where) in specs.items():
         unknown = set(spec) - WALK_KEYS
