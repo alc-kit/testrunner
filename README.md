@@ -27,12 +27,12 @@ in this repository, not in a subscriber's copy.
 
 A project usually starts it from a small wrapper, and says what the wrapper is called, so
 the help (`./run.sh --help`) and every "run this next" hint name the command its operators
-type, not `testrunner`:
+type, not `testrunner`. `$0` is exactly what they typed:
 ```sh
 #!/usr/bin/env bash
+export TESTRUNNER_PROG="$0"
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export TESTRUNNER_PROG="${TESTRUNNER_PROG:-./run.sh}"
 exec "$HERE/testrunner/bin/testrunner" --root "$HERE" "$@"
 ```
 

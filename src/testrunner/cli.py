@@ -16,7 +16,7 @@
                                   each step's own, it never replaces it)
   --config NAME|FILE   --with key=value   --color auto|always|never   --root DIR
   -v | -vv | --log-level LEVEL   show testrunner's own log (decisions) on stderr
-  TESTRUNNER_PROG=./run.sh   a wrapper's name, used by this help and by every hint
+  TESTRUNNER_PROG="$0"       a wrapper names itself (export it in run.sh): this help and every hint use it
   --show-commands      print every command before it runs, as a line you can paste into a
                        shell (also: TESTRUNNER_SHOW_COMMANDS=1)
 
