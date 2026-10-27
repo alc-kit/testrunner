@@ -571,6 +571,16 @@ lines of that step's log, with colour codes stripped and NOLOG values already ma
 The **HTML** page shows the same run as charts: a timeline coloured by outcome, and each
 step's change against earlier runs. It needs nothing external, so it opens offline.
 
+Both formats also carry the **state**:
+- **State changes**: each variable at the start and at the end, then every change a step
+  claimed, with the validator (or observer) that confirmed it and its reason. Values checked and
+  kept after a step that claimed nothing are listed too, and a value that became **unknown** is
+  marked, with what each validator answered.
+- **State machine**: the machine as declared when the run started. That is, per variable: how it
+  is read back, each value with its criterion and validator, and every transition.
+- **State/event matrix**: per step and outcome, the state it needs, the state it leaves, and
+  what comes next.
+
 Both are built from the journal alone, so any past run can be reported afterwards. An
 action or a `step_end` hook can add its own numbers with `step.metric("tasks", 779)`;
 they are recorded in the journal and shown in both formats.

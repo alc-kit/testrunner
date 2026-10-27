@@ -267,6 +267,24 @@ def check_declarations(reg: Any, states: dict[str, StateVar]) -> None:
                           + "\n".join(problems))
 
 
+def describe(states: dict[str, StateVar], reg: Any) -> list[dict]:
+    """The declared machine as plain data, for the journal (run_start) and the reports."""
+    from .validate import spec_text
+    out = []
+    for sv in states.values():
+        read = (f"observed in order {', '.join(sv.order)}" if sv.order else
+                "observed" if sv.name in reg.observers else "model only" if sv.model_only else
+                "constant" if not sv.transitions else "not read back")
+        out.append({
+            "var": sv.name, "initial": sv.initial, "read": read,
+            "values": [{"value": v, "criterion": sv.criteria.get(v, ""),
+                        "validator": spec_text(sv.validators[v]) if v in sv.validators else ""}
+                       for v in sv.values],
+            "transitions": [{"from": t.frm, "to": t.to, "by": t.by, "on": t.on} for t in sv.transitions],
+        })
+    return out
+
+
 class DerivedObserver:
     """The observer of a variable that declares `observe: {order: [...]}`: its validators are
     asked in that order, and the first value that HOLDS is the answer. A value that cannot

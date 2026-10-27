@@ -78,12 +78,25 @@ class Verdict:
                 + (f": {self.why}" if self.why else ""))
 
     def spec_text(self) -> str:
-        return ", ".join(f"{k}: {v}" for k, v in self.spec.items())
+        return spec_text(self.spec)
 
     def record(self) -> dict:
         return {"var": self.var, "value": self.value, "role": self.role, "kind": self.kind,
                 "validator": self.spec_text(), "answer": self.answer, "why": self.why,
                 "seconds": round(self.seconds, 2)}
+
+
+def spec_text(spec: dict) -> str:
+    """A validator as the runner config spells it: `outcome: true`, `run: [a, b]`."""
+    def show(v: Any) -> str:
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, list):
+            return "[" + ", ".join(show(x) for x in v) + "]"
+        if isinstance(v, dict):
+            return "{" + ", ".join(f"{k}: {show(x)}" for k, x in v.items()) + "}"
+        return str(v)
+    return ", ".join(f"{k}: {show(v)}" for k, v in spec.items())
 
 
 def kind_of(spec: dict, reg: Any) -> str:

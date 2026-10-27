@@ -28,7 +28,7 @@ from .config import RunConfig, RunnerConfig, deep_merge, lookup
 from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
 from .planner import Program, Step, Walker, matrix, produced, requires_holds, when_explained, when_holds
-from .statemachine import ANY, DerivedObserver, claimer
+from .statemachine import ANY, DerivedObserver, claimer, describe
 from .validate import BEFORE, CLAIMED, OBSERVE, Claim, Verdict, judge
 
 NOT_LOOKING = ("outcome", "const")        # validator kinds that confirm without looking at the system
@@ -319,7 +319,7 @@ class Runner:
         run.state = state
         result = RunResult(True, run.results)
         self.journal("run_start", config=str(self.run_config.file or ""), source=program.source,
-                     matrix=matrix(program, self.reg),
+                     matrix=matrix(program, self.reg), machine=describe(rc.states, self.reg),
                                   steps=[s.id for s in program.main], state=state, pid=os.getpid(),
                      readonly=self.readonly, **({"forwarded": list(self.forwarded)} if self.forwarded else {}))
         try:

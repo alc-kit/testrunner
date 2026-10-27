@@ -56,6 +56,10 @@ class RunRecord:
     matrix: list = field(default_factory=list)   # the state/event matrix the run started with
     source: str = ""            # where the steps came from ("plan of x.yml", "all = path full: no plan in x.yml")
     forwarded: list = field(default_factory=list)  # the arguments after `--` (a narrowed run says so)
+    machine: list = field(default_factory=list)     # the declared state machine (statemachine.describe)
+    changes: list = field(default_factory=list)     # state_changed / state_checked / state_unknown, in order
+    state_start: dict = field(default_factory=dict)
+    state_end: dict | None = None
     end: datetime | None = None
     passed: bool | None = None
     why: str = ""
@@ -90,7 +94,8 @@ def runs_from_journal(store: Store) -> list[RunRecord]:
             rid = e.get("run") or f"run{n}"
             current = rid
             runs[rid] = RunRecord(rid, _t(e), config=e.get("config", ""), source=e.get("source", ""),
-                                  matrix=e.get("matrix") or [], forwarded=e.get("forwarded") or [])
+                                  matrix=e.get("matrix") or [], forwarded=e.get("forwarded") or [],
+                                  machine=e.get("machine") or [], state_start=e.get("state") or {})
             order.append(rid)
             continue
         run = runs.get(rid)
@@ -106,8 +111,11 @@ def runs_from_journal(store: Store) -> list[RunRecord]:
         elif ev == "step_skip":
             run.steps.append(StepRun(e["step"], e.get("action", e["step"]), "skipped", _t(e), 0.0,
                                      e.get("why", "")))
+        elif ev in ("state_changed", "state_checked", "state_unknown"):
+            run.changes.append(_change(e))
         elif ev == "run_end":
             run.end, run.passed, run.why = _t(e), bool(e.get("passed")), e.get("why", "")
+            run.state_end = e.get("state")
     # a step that started and has not ended: still running (or its run was killed)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     for (rid, step), (start, action) in open_steps.items():
@@ -116,6 +124,29 @@ def runs_from_journal(store: Store) -> list[RunRecord]:
             run.steps.append(StepRun(step, action, "running", start, (now - start).total_seconds(),
                                      "no end recorded yet"))
     return [runs[r] for r in order]
+
+
+def _change(e: dict) -> dict:
+    """One state event as a report row: what changed (or was checked), and what decided it."""
+    ev = e["event"]
+    if ev == "state_changed":
+        c = e.get("confirmed_by") or {}
+        how = c.get("kind", "?") + (f" ({c['validator']})" if c.get("validator") else "")
+        return {"kind": "changed", "step": e.get("step", ""), "var": e.get("var", ""), "from": e.get("from"),
+                "to": e.get("to"), "outcome": e.get("outcome", ""), "how": how, "why": c.get("why", ""),
+                "note": e.get("note", "")}
+    if ev == "state_checked":
+        verdicts = e.get("verdicts") or []
+        how = "; ".join(f"{v.get('value')} {v.get('answer')} ({v.get('kind')})" for v in verdicts)
+        return {"kind": "checked", "step": e.get("step", ""), "var": e.get("var", ""), "from": e.get("value"),
+                "to": e.get("value"), "outcome": e.get("outcome", ""), "how": how,
+                "why": "; ".join(v.get("why", "") for v in verdicts if v.get("why")), "note": "unchanged"}
+    verdicts = e.get("verdicts") or []
+    how = ("; ".join(f"{v.get('value')} {v.get('answer')} ({v.get('kind')})" for v in verdicts)
+           or (f"the observer reads {e['observed']!r}" if "observed" in e else ""))
+    return {"kind": "unknown", "step": e.get("step", ""), "var": e.get("var", ""), "from": e.get("was"),
+            "to": None, "outcome": e.get("outcome", ""), "how": how, "why": e.get("why", ""),
+            "note": (e.get("why") or "").splitlines()[0] if e.get("why") else ""}
 
 
 def _median_before(runs: list[RunRecord], idx: int, step_id: str) -> tuple[float | None, int]:
@@ -278,6 +309,7 @@ def render(runs: list[RunRecord], run_id: str | None = None, title: str = "") ->
 body {{ margin:0; background:var(--page); color:var(--ink); font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }}
 main {{ max-width:900px; margin:0 auto; padding:24px 16px 48px; }}
 h1 {{ font-size:20px; margin:0 0 4px; }} h2 {{ font-size:15px; margin:28px 0 8px; }}
+h3 {{ font-size:13px; margin:16px 0 4px; }} .card table + table {{ margin-top:12px; }}
 .sub, .k {{ color:var(--ink2); }} .note {{ color:var(--muted); font-size:12px; margin:4px 0 0; }}
 .tiles {{ display:flex; flex-wrap:wrap; gap:12px; margin:16px 0; }}
 .tile {{ background:var(--surface); border:1px solid var(--ring); border-radius:10px; padding:10px 14px; min-width:150px; }}
@@ -322,7 +354,7 @@ th {{ color:var(--ink2); font-weight:600; }} td.num {{ text-align:right; font-va
   f'<div class="card">{comp_svg}</div><p class="note">Change against the median of the last {HISTORY} passed runs of the same step; steps under {MIN_SECONDS:.0f}s are not compared. Bars stop at ±{lim * 100:.0f}%; the table has the exact numbers.</p>')
  if comp_svg else '<p class="note">No earlier passed run of these steps in this journal yet.</p>'}
 <h2>All numbers</h2>
-<div class="card"><table><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>{_matrix_html(run)}
+<div class="card"><table><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>{_states_html(run)}{_matrix_html(run)}
 <p class="note">Built from {esc(str(len(runs)))} run(s) in the journal by testrunner.</p>
 </main><div id="tip"></div>
 <script>
@@ -377,6 +409,96 @@ def _matrix_html(run: "RunRecord") -> str:
             f'<div class="card"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>')
 
 
+def _val(v: Any) -> str:
+    return "unknown" if v is None else str(v)
+
+
+def _states_md(run: "RunRecord") -> list[str]:
+    out: list[str] = []
+    if run.changes or run.state_start:
+        out += ["## State changes", ""]
+        if run.state_start:
+            end = run.state_end if run.state_end is not None else {}
+            out += ["| variable | at the start | at the end |", "|---|---|---|"]
+            out += [f"| {_md(k)} | {_md(_val(v))} | {_md(_val(end.get(k))) if run.state_end is not None else '(running)'} |"
+                    for k, v in run.state_start.items()] + [""]
+        if run.changes:
+            out += ["Every change a step claimed, and what confirmed it; every value checked after a step that "
+                    "claimed nothing (or whose claim did not hold); every value that became unknown.", "",
+                    "| step | variable | from → to | step outcome | decided by | note |", "|---|---|---|---|---|---|"]
+            for c in run.changes:
+                icon = {"changed": "", "checked": "", "unknown": "❌ "}[c["kind"]]
+                arrow = (f"{_val(c['from'])} (kept)" if c["kind"] == "checked"
+                         else f"{_val(c['from'])} → {icon}{_val(c['to'])}")
+                out.append(f"| {_md(c['step'])} | {_md(c['var'])} | {_md(arrow)} | {_md(c['outcome'])} | "
+                           f"{_md(c['how'])}{(' — ' + _md(c['why'])) if c['why'] and c['kind'] != 'unknown' else ''} | "
+                           f"{_md(c['note'])} |")
+            out.append("")
+        else:
+            out += ["_No step changed or checked a state variable._", ""]
+    if run.machine:
+        out += ["## State machine", "", "As declared in the runner config when the run started.", ""]
+        for m in run.machine:
+            out += [f"### {_md(m['var'])}", "",
+                    f"Initial: {_md(_val(m.get('initial')) if m.get('initial') is not None else '(none: observed)')} · "
+                    f"read back: {_md(m.get('read', ''))}", "",
+                    "| value | criterion | validator |", "|---|---|---|"]
+            out += [f"| {_md(v['value'])} | {_md(v['criterion']) or '_(none yet)_'} | {_md(v['validator']) or '—'} |"
+                    for v in m["values"]] + [""]
+            if m["transitions"]:
+                out += ["| from | to | by | on |", "|---|---|---|---|"]
+                out += [f"| {_md(t['from'])} | {_md(t['to'])} | {_md(t['by'])} | {_md(t['on'])} |"
+                        for t in m["transitions"]] + [""]
+    return out
+
+
+def _states_html(run: "RunRecord") -> str:
+    esc = html.escape
+    parts: list[str] = []
+    if run.changes or run.state_start:
+        parts.append("\n<h2>State changes</h2>")
+        if run.state_start:
+            end = run.state_end if run.state_end is not None else {}
+            rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(_val(v))}</td><td>"
+                           f"{esc(_val(end.get(k))) if run.state_end is not None else '(running)'}</td></tr>"
+                           for k, v in run.state_start.items())
+            parts.append('<div class="card"><table><thead><tr><th>variable</th><th>at the start</th>'
+                         f'<th>at the end</th></tr></thead><tbody>{rows}</tbody></table></div>')
+        if run.changes:
+            rows = []
+            for c in run.changes:
+                arrow = (f"{_val(c['from'])} (kept)" if c["kind"] == "checked"
+                         else f"{_val(c['from'])} → {_val(c['to'])}")
+                cls = ' class="s-critical" style="color:#fff"' if c["kind"] == "unknown" else ""
+                why = c["why"] if c["kind"] != "unknown" else ""
+                rows.append(f"<tr><td>{esc(c['step'])}</td><td>{esc(c['var'])}</td><td{cls}>{esc(arrow)}</td>"
+                            f"<td>{esc(c['outcome'])}</td><td>{esc(c['how'])}{(' — ' + esc(why)) if why else ''}</td>"
+                            f"<td>{esc(c['note'])}</td></tr>")
+            parts.append('<p class="note">Every change a step claimed, and what confirmed it; every value checked '
+                         'after a step that claimed nothing (or whose claim did not hold); every value that became '
+                         'unknown.</p><div class="card"><table><thead><tr><th>step</th><th>variable</th>'
+                         '<th>from → to</th><th>step outcome</th><th>decided by</th><th>note</th></tr></thead>'
+                         f'<tbody>{"".join(rows)}</tbody></table></div>')
+        else:
+            parts.append('<p class="note">No step changed or checked a state variable.</p>')
+    if run.machine:
+        parts.append('\n<h2>State machine</h2>\n<p class="note">As declared in the runner config when the run '
+                     'started.</p>')
+        for m in run.machine:
+            init = esc(_val(m["initial"])) if m.get("initial") is not None else "(none: observed)"
+            vals = "".join(f"<tr><td>{esc(v['value'])}</td><td>{esc(v['criterion']) or '<i>(none yet)</i>'}</td>"
+                           f"<td>{esc(v['validator']) or '—'}</td></tr>" for v in m["values"])
+            trs = "".join(f"<tr><td>{esc(t['from'])}</td><td>{esc(t['to'])}</td><td>{esc(t['by'])}</td>"
+                          f"<td>{esc(t['on'])}</td></tr>" for t in m["transitions"])
+            parts.append(f"<h3>{esc(m['var'])}</h3><p class=\"note\">initial: {init} · read back: "
+                         f"{esc(m.get('read', ''))}</p>"
+                         '<div class="card"><table><thead><tr><th>value</th><th>criterion</th><th>validator</th>'
+                         f'</tr></thead><tbody>{vals}</tbody></table>'
+                         + ('<table><thead><tr><th>from</th><th>to</th><th>by</th><th>on</th></tr></thead>'
+                            f'<tbody>{trs}</tbody></table>' if trs else "") + "</div>")
+    return "".join(parts)
+
+
 def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Store | None = None) -> str:
     idx = len(runs) - 1 if run_id is None else next((i for i, r in enumerate(runs) if r.id == run_id), None)
     if idx is None:
@@ -429,6 +551,7 @@ def render_markdown(runs: list[RunRecord], run_id: str | None = None, store: Sto
             out.append(f"    {label} :{tag}, s{i}, {start}, {max(int(round(s.seconds)), 1)}s")
         out += ["```", ""]
 
+    out += _states_md(run)
     if run.matrix:
         out += ["## State/event matrix", "", "`*` marks the expected outcome.", "",
                 "| step | requires (state in) | outcome (event) | state after | next |", "|---|---|---|---|---|"]
