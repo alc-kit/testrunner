@@ -421,7 +421,9 @@ def test_one_name_one_action(s, capsys):
 def test_list_shows_walks_but_never_inner_steps(s, capsys):
     code, out, _, _ = go(s, capsys, GROW, "--list")
     assert code == 0, out
-    assert "grow" in out and "grow/create" not in out
+    actions = out.split("\nstates:")[0]               # the actions section; states names inner steps as `by`
+    assert "grow" in actions and "grow/create" not in actions
+    assert "absent -> created  by grow/create on passed" in out   # the declared transition is shown
 
 
 # ── the template grammar ─────────────────────────────────────────────────────
