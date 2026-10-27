@@ -462,7 +462,7 @@ def listing(rc, reg) -> int:
     if rc.states:
         print("states:")
         for var, sv in rc.states.items():
-            how = ("observed" if var in reg.observers else f"observed in order {sv.order}" if sv.order
+            how = (f"observed in order {sv.order}" if sv.order else "observed" if var in reg.observers
                    else "model only" if sv.model_only else "constant" if not sv.transitions else "?")
             print(f"  {var}: {sv.values}  initial {sv.initial}  ({how})")
             for value in sv.values:

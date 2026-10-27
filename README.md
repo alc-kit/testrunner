@@ -107,13 +107,26 @@ async def api(config):
     await client.close()          # teardown, also after a failure
 ```
 
-**Observers** read reality; where one exists, it wins over what an action claimed:
+**Observers** read reality:
 ```python
 @observer("service")
 def service_state(api): return api.status()
 ```
 They are asked before the plan is judged, when the run starts, and after every step, whatever
-its outcome, except after a `readonly` action, which only looks.
+its outcome, except after a `readonly` action, which only looks. At the start, what they read
+replaces the stored state. After a step, an observer that contradicts the model FAILS the step
+(see [State machine](#state-machine)).
+
+**Validators** confirm a claimed value: `validate:` in the runner config, as a command, an
+`@validator` function, an extension's kind (`playbook:`), or as weak as "the step passed"
+(`{outcome: true}`). A claim is committed only when its validator holds:
+```python
+from testrunner import validator
+
+@validator()                      # validate: {python: service-is}
+def service_is(claim, api):
+    return api.status() == claim.value, f"the API says {api.status()}"
+```
 
 **Hooks**: `run_start`, `step_start`, `step_end`, `run_end` — `@hook("step_end")`; a
 hook receives only the arguments it names (`run`, `step`, `result`).
@@ -178,7 +191,59 @@ prints the whole of it as a table, which also goes in the journal and both repor
 - **Guards**: an action's `requires` (the states it may start from). Checked before it runs, and
   statically over every branch before the run starts.
 - **Effects**: an action's `produces` (on `passed`) and `produces_on` (per outcome): the state it
-  leaves. The observers then read what it really left.
+  CLAIMS to leave. A claim is never taken on trust (next bullets).
+- **Validators** answer one question for one value: does it hold now? There are three answers:
+  *holds*, *does not hold*, *cannot tell*. How strong a validator is, is the subscriber's to
+  decide and to describe. Every record says which validator confirmed what.
+
+  | kind | holds | does not hold | cannot tell |
+  |---|---|---|---|
+  | `{outcome: true}` | the claiming step ended on the outcome that claims the change | it did not | — |
+  | `{outcome: [id, ...]}` | these inner steps of the claiming walk passed (e.g. build and fetch) | one did not | — |
+  | `{const: true}` | always: the claim needs no check | — | — |
+  | `{run: [argv] or "shell", env, cwd, timeout}` | exit 0 | exit 1 | any other exit, a timeout, a prompt |
+  | `{python: <name>}` (an `@validator`) | `True` | `False` | `None`, or it raises |
+  | `{playbook: <path>, limit, extra, args, timeout}` (`ext.ansible`) | exit 0 | exit 2 (a task failed) | exit 4 (unreachable), any other; or `changed` under `--check` |
+  | `{adhoc: {pattern, module, args}, limit}` (`ext.ansible`) | exit 0 | exit 2 | exit 4, any other; or a host `CHANGED` or `SKIPPED` |
+
+  - Their values are templates like a walk step's (`{param.node}`, `{run.root}`, `{env.X}`).
+  - `playbook:` and `adhoc:` always run with `--check`: a validator only looks. Under `--check`,
+    ansible SKIPS `command`/`shell` tasks. Give a read-only command task `check_mode: false`, or
+    the validator proves nothing. An ad-hoc command that was skipped answers *cannot tell*.
+  - `run:` and `python:` validators cannot be forced to only look. Whoever writes one promises it.
+  - An extension adds a kind with `@validator_kind("<name>", keys=(...))`. Its function returns
+    `(answer, why)`.
+- **Claims are confirmed.** After a step, for every variable its action declares a transition
+  for, from the value the variable has now:
+  - **The outcome claims a change**: the target value's validator is asked. If it *holds*, the
+    change is committed and journalled as `state_changed`, with the validator that confirmed it.
+    Otherwise the step **fails**, and the variable is checked as below.
+  - **The outcome claims nothing, or the claim did not hold** (a failed, errored or aborted
+    step; a refused claim): nothing is assumed. The value before, and every value the action's
+    transitions could lead to, are asked:
+    - exactly one holds: that is the value (`state_checked` when it is unchanged; `state_changed`,
+      "reached although the step ended failed", when it moved);
+    - none holds, several hold, or one cannot tell: the variable becomes **unknown**, and the
+      step fails. Its error tells the whole story: the claim, every validator's answer and why,
+      what is blocked (steps that require the variable do not run; the scenario is not
+      released), which logs to read, and what to do next. It is journalled as `state_unknown`.
+  - A dry run asks no validator: the model carries the walk.
+- **Observers and validators** are both proof, and when both answer they must agree. After a
+  step, an observer that reads a different value from the model fails the step:
+  - if this step's validator LOOKED (anything but `outcome:`/`const:`), two looks disagree, and
+    the variable is **unknown**;
+  - otherwise the observer is the only one that looked, so its reading stands: the step's claim
+    did not hold, or the step changed the variable without declaring it;
+  - inside a walk, an observed change that the enclosing walk declares (from the value the
+    variable had, to the value now seen) is that walk's claim, seen early. It is recorded, not
+    failed;
+  - a value the model does not know (unknown) is learned from the observer.
+- **Observers derived from validators**: `observe: {order: [clustered, installed, up, absent]}`
+  asks each value's validator in that order, and the first that holds is the value. An earlier
+  value that *cannot tell* stops the search: the observer cannot look, and the run warns and keeps
+  the model's value. Only validators that look can be asked, so an `outcome:`/`const:` validator in
+  the order is refused. The validators run outside any step, with the run's fixtures; a
+  `{param.x}` comes from the run config.
 - **Transitions**: what comes next, decided by how the step ENDED. Two forms:
   ```yaml
   on:
@@ -186,7 +251,7 @@ prints the whole of it as a table, which also goes in the journal and both repor
     join:                              # rules on outcome AND the observed state; first match wins
       - when: {outcome: passed, state: {rig: clustered}}   # the marker that means "go on"
         then: continue
-      - when: {outcome: passed, state: {rig: installed}}   # joined, but no cluster formed
+      - when: {outcome: failed, state: {rig: installed}}   # its claim did not hold: no cluster formed
         then: {goto: form}
       - when: {outcome: failed}
         then: [membership]                                 # run these, then go on
@@ -203,12 +268,12 @@ prints the whole of it as a table, which also goes in the journal and both repor
 
 ```
 $ testrunner --plan --matrix          # the join step of the example above
-  step    | requires (state in)      | outcome (event) | state after    | next
-  --------+--------------------------+-----------------+----------------+------------------------------------
-  join    | rig: installed|clustered | passed*         | rig: clustered | outcome passed rig=clustered -> continue; outcome passed rig=installed -> goto form; otherwise -> stop (failed)
-          |                          | failed          | (unchanged)    | outcome failed -> run membership, then go on
-          |                          | errored         | (unchanged)    | otherwise -> stop (failed)
-          |                          | aborted         | (unchanged)    | stop (aborted)
+  step    | requires (state in)      | outcome (event) | state after                               | next
+  --------+--------------------------+-----------------+-------------------------------------------+------------------------------------
+  join    | rig: installed|clustered | passed*         | rig: clustered                            | outcome passed rig=clustered -> continue; otherwise -> stop (failed)
+          |                          | failed          | (checked: unchanged, reached, or unknown) | outcome failed rig=installed -> goto form; outcome failed -> run membership, then go on
+          |                          | errored         | (checked: unchanged, reached, or unknown) | otherwise -> stop (failed)
+          |                          | aborted         | (checked: unchanged, reached, or unknown) | stop (aborted)
 ```
 
 **Editing a walk.** A run config's `edit:` list changes the walk its plan compiles to, without

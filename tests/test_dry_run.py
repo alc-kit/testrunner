@@ -93,7 +93,9 @@ def dry(sub, tmp_path, monkeypatch):
     calls = tmp_path / "calls.txt"
     for name in ("ansible-playbook", "vagrant"):
         p = bindir / name
-        p.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$(basename "$0") $*" >> {calls}\nexit 0\n')
+        # `vagrant up` is what leaves the rig done, as grow claims (the observer reads the file)
+        done = f'[ "$1" = up ] && echo done > {sub.root / "rig"}\n' if name == "vagrant" else ""
+        p.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$(basename "$0") $*" >> {calls}\n{done}exit 0\n')
         p.chmod(p.stat().st_mode | stat.S_IEXEC)
     inv = bindir / "ansible-inventory"
     inv.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "ansible-inventory $*" >> {calls}\n'

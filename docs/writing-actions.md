@@ -121,6 +121,8 @@ plan:
    disagree, so fix one of them before you run anything.
 2. **A negative control.** Write the input the action *must* refuse or fail on, and run it
    with `expect: {<step>: {outcome: failed}}`. A check that has never failed proves nothing.
+   The same goes for each validator: run it once where its value holds, and once one state
+   earlier, where it must not.
 3. **A real run** of the shortest range that reaches it (`testrunner join..rebalance`),
    then the full plan.
 

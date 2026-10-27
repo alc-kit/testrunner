@@ -85,13 +85,15 @@ def subscriber(sub):
     return sub
 
 
+# a join the observer contradicts (it claims clustered; the rig is only installed) ends FAILED,
+# with the observed state: the rules route on that (WP testrunner-state-validation, D4)
 RULES = """plan:
   path: [full]
   on:
     join:
       - when: {outcome: passed, state: {rig: clustered}}
         then: continue
-      - when: {outcome: passed, state: {rig: installed}}
+      - when: {outcome: failed, state: {rig: installed}}
         then: {goto: form}
       - when: {outcome: failed}
         then: [membership]
@@ -126,24 +128,34 @@ def test_the_marker_state_continues(subscriber, capsys):
     assert steps(ev) == ["up", "install", "form", "join", "verify"]
 
 
-def test_passed_but_not_clustered_diverts_to_form(subscriber, capsys):
+def test_a_join_that_left_no_cluster_fails_and_diverts_to_form(subscriber, capsys):
     subscriber.write("join-leaves", "installed clustered")      # the first join leaves no cluster
     code, out, _, ev = run(subscriber, capsys, RULES)
-    assert code == 0, out
     assert steps(ev) == ["up", "install", "form", "join", "form", "join", "verify"]
-    assert "join ended passed: goto form (rule: outcome passed rig=installed)" in out
+    assert "join ended failed: goto form (rule: outcome failed rig=installed)" in out
+    assert "the observer reads rig='installed', the model says 'clustered'" in out
 
 
 def test_no_rule_matches_the_run_stops_failed(subscriber, capsys):
     subscriber.write("join-leaves", "up")                       # a state no rule names
-    code, out, _, ev = run(subscriber, capsys, RULES)
+    rules = RULES.replace("      - when: {outcome: failed}\n        then: [membership]\n", "")
+    code, out, _, ev = run(subscriber, capsys, rules)
     assert code == 1 and steps(ev)[-1] == "join"
     end = next(e for e in ev if e["event"] == "run_end")
-    assert "join ended passed with state {'rig': 'up'}: no transition rule matches" in end["why"]
+    assert "join ended failed with state {'rig': 'up'}: no transition rule matches" in end["why"]
 
 
-def test_control_the_old_form_continues_on_the_expected_outcome_whatever_the_state(subscriber, capsys):
+def test_control_the_old_form_reacts_to_the_outcome_only(subscriber, capsys):
+    # a join that leaves the rig `up` while claiming clustered is a FAILED join: the outcome-only
+    # form reacts to that outcome, whatever the state; one that leaves it clustered goes on
     subscriber.write("join-leaves", "up")
+    code, _, _, ev = run(subscriber, capsys, "plan:\n  path: [full]\n  on: {join: {failed: stop}}\n")
+    assert code == 1 and steps(ev)[-1] == "join"
+    (subscriber.root / "join-leaves").unlink()
+    (subscriber.root / "joins").unlink()
+    (subscriber.root / "rig").unlink()
+    (subscriber.root / "state" / "state.json").unlink()
+    (subscriber.root / "state" / "scenario.json").unlink(missing_ok=True)
     code, _, _, ev = run(subscriber, capsys, "plan:\n  path: [full]\n  on: {join: {failed: stop}}\n")
     assert code == 0 and steps(ev)[-1] == "verify"
 
@@ -167,11 +179,12 @@ def test_a_config_reroutes_an_inherited_plan_with_a_transition_edit(subscriber, 
     subscriber.write("configs/base.yml", RULES)
     subscriber.write("join-leaves", "installed clustered")
     text = ("extends: base\nedit:\n  - transition: join\n    rules:\n"
-            "      - {when: {outcome: passed, state: {rig: installed}}, then: stop}\n"
+            "      - {when: {outcome: failed, state: {rig: installed}}, then: stop}\n"
             "      - {when: {outcome: passed}, then: continue}\n")
     code, out, _, ev = run(subscriber, capsys, text)
     assert steps(ev) == ["up", "install", "form", "join"]       # the edit's rules replaced the plan's
-    assert code == 0 and "edits: transitions of join" in out    # stop on an expected outcome: ok
+    assert "edits: transitions of join" in out
+    assert "join ended failed: plan says stop (rule: outcome failed rig=installed)" in out
 
 
 # ── checked before anything runs ────────────────────────────────────────────
@@ -220,8 +233,9 @@ def test_plan_matrix_prints_the_matrix(subscriber, capsys):
     head = next(i for i, ln in enumerate(lines) if "requires (state in)" in ln)
     table = "\n".join(lines[head:])
     assert "join" in table and "rig: installed|clustered" in table
-    assert ("outcome passed rig=clustered -> continue; outcome passed rig=installed -> goto form; "
-            "otherwise -> stop (failed)") in table
+    assert "outcome passed rig=clustered -> continue; otherwise -> stop (failed)" in table
+    assert ("(checked: unchanged, reached, or unknown) | outcome failed rig=installed -> goto form; "
+            "outcome failed -> run membership, then go on") in table
     assert "passed*" in table and "stop (aborted)" in table
     assert "on join otherwise: stop (failed)" in out
 
@@ -234,8 +248,10 @@ def test_control_without_matrix_no_table(subscriber, capsys):
 def test_the_matrix_is_journaled_and_in_both_reports(subscriber, capsys):
     code, _, _, ev = run(subscriber, capsys, RULES)
     start = next(e for e in ev if e["event"] == "run_start")
-    row = next(r for r in start["matrix"] if r["step"] == "join")
-    assert row["outcome"] == "passed*" and "goto form" in row["next"]
+    rows = start["matrix"]
+    i = next(i for i, r in enumerate(rows) if r["step"] == "join")
+    assert rows[i]["outcome"] == "passed*" and rows[i + 1]["outcome"] == "failed"
+    assert "goto form" in rows[i + 1]["next"] and rows[i + 1]["after"].startswith("(checked")
     for fmt, needle in (("md", "## State/event matrix"), ("html", "<h2>State/event matrix</h2>")):
         main(["--root", str(subscriber.root), "--color", "never", "--report-of", "last", "--report-format", fmt])
         path = capsys.readouterr().out.strip().splitlines()[0]

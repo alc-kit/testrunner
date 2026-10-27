@@ -882,7 +882,12 @@ def matrix(prog: Program, reg: Registry, prefix: str = "", depth: int = 0,
         for n, o in enumerate([PASSED, *named, "failed", "errored", "aborted"]):
             spec = act.produces if o == PASSED else act.produces_on.get(o, {})
             after = ", ".join(f"{k}: " + (" ".join(f"{a}->{b}" for a, b in v.items()) if isinstance(v, dict) else str(v))
-                              for k, v in spec.items()) or "(unchanged)"
+                              for k, v in spec.items())
+            if not after:
+                # an action that claims a change on SOME outcome is checked after every other one:
+                # its validators say what it left (validate.py; runner._settle)
+                after = "(checked: unchanged, reached, or unknown)" if act.produces or act.produces_on \
+                    else "(unchanged)"
             if o == "aborted":
                 nxt = "stop (aborted)"
             elif rules is not None:

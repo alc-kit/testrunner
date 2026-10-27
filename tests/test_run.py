@@ -70,7 +70,8 @@ def declare_fake_start(toy):
 
 
 def test_observer_overrides_the_model(toy, capsys):
-    # the model says `start` produces running; reality (the observer) says otherwise
+    # the model says `start` produces running; reality (the observer) says otherwise: its reading
+    # stands, and the step FAILS — its claim did not hold (nothing but the outcome confirmed it)
     toy.write("actions/liar.py", """
         from testrunner import action
         @action(requires={"service": "installed"}, produces={"service": "running"})
@@ -79,7 +80,8 @@ def test_observer_overrides_the_model(toy, capsys):
         """)
     declare_fake_start(toy)
     code, out = toy.run("uninstall", "install", "fake-start", capsys=capsys)
-    assert code == 0 and "observed service='installed'" in out
+    assert code == 1 and "observed service='installed'" in out
+    assert "the observer reads service='installed', the model says 'running' — the step's claim did not hold" in out
     assert json.loads((toy.root / "state" / "state.json").read_text())["service"] == "installed"
 
 
@@ -98,7 +100,8 @@ def test_expect_state_checked_against_reality(toy, capsys):
           expect: {fake-start: {state: {service: running}}}
         """)
     code, out = toy.run("-c", "liar", capsys=capsys)
-    assert code == 1 and "expected state not reached" in out
+    # the observer already contradicts the claim, before the plan's expectation is judged
+    assert code == 1 and "the step's claim did not hold" in out
 
 
 SIMPLE = """

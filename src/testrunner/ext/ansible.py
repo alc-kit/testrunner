@@ -50,7 +50,7 @@ import shlex
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..api import ERRORED, FAILED, OutcomeError, step_kind
+from ..api import CANNOT_TELL, DOES_NOT_HOLD, ERRORED, FAILED, HOLDS, OutcomeError, step_kind, validator_kind
 from ..proc import Proc, Result, fill_rules
 
 
@@ -491,3 +491,68 @@ async def require_hosts_step(spec, ans, step):
         raise OutcomeError(FAILED, f"stage {stage!r} targets the group {group!r}, which resolves to NO hosts.\n"
                                    "Ansible would treat that as success while doing nothing at all."
                                    + (f" {spec['hint']}" if spec.get("hint") else ""))
+
+
+# ── validator kinds (testrunner.validate) ─────────────────────────────────────
+# Both run with --check (WP testrunner-state-validation D3): a validator only LOOKS. ansible's
+# exit codes give the three answers: 0 holds, 2 a task failed (does not hold), 4 a host was
+# unreachable (cannot tell); anything else cannot tell either. Under --check, a task that
+# would change something reports `changed`, and a command/shell task is SKIPPED unless it says
+# `check_mode: false` — a validator that skips proves nothing, so both cannot tell.
+
+_RECAP = re.compile(r"^\S+\s*:\s*ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)"
+                    r"(?:\s+skipped=(\d+))?", re.M)
+_ADHOC = re.compile(r"^(\S+) \| (SUCCESS|CHANGED|FAILED!|UNREACHABLE!|SKIPPED)", re.M)
+
+
+def _tail(r: Result, n: int = 3) -> str:
+    return " | ".join(r.text.strip().splitlines()[-n:])
+
+
+def _answer(r: Result, changed: int, skipped: int, what: str) -> tuple[str, str]:
+    if r.timed_out:
+        return CANNOT_TELL, f"{what} timed out"
+    if r.unanswered is not None:
+        return CANNOT_TELL, f"{what} asked {r.unanswered!r}"
+    if r.returncode == 0 and changed:
+        return CANNOT_TELL, (f"{what} would CHANGE something under --check ({changed} change(s)): "
+                             f"a validator must only look")
+    if r.returncode == 0 and skipped:
+        return CANNOT_TELL, (f"{what} SKIPPED {skipped} task(s)/host(s) under --check: a skipped check proves "
+                             f"nothing (give a read-only command task `check_mode: false`)")
+    answer = {0: HOLDS, 2: DOES_NOT_HOLD, 4: CANNOT_TELL}.get(r.returncode, CANNOT_TELL)
+    meaning = {0: "", 2: " (a task failed)", 4: " (a host was unreachable)"}.get(r.returncode, "")
+    return answer, f"{what}: exit {r.returncode}{meaning}; last output: {_tail(r)}"
+
+
+@validator_kind("playbook", keys=("limit", "extra", "args", "timeout"))
+async def playbook_validator(spec, ans, claim):
+    """`validate: {playbook: <path>, limit, extra, args, timeout}` — run with --check."""
+    r = await ans.playbook(spec["playbook"], "--check", *[str(a) for a in spec.get("args") or []],
+                           limit=_step_limit(spec), extra=spec.get("extra"), log=claim.log,
+                           timeout=spec.get("timeout"), check=False, echo=False, ask_operator=False)
+    recaps = _RECAP.findall(r.text)
+    changed = sum(int(m[1]) for m in recaps)
+    skipped = sum(int(m[4] or 0) for m in recaps)
+    if r.returncode == 0 and not recaps:
+        return CANNOT_TELL, f"{spec['playbook']}: exit 0 but no PLAY RECAP — it ran against no host"
+    answer, why = _answer(r, changed, 0, str(spec["playbook"]))
+    if answer == HOLDS and skipped:
+        why += f" (skipped={skipped}: tasks a `when:` left out, or command tasks --check skipped)"
+    return answer, why
+
+
+@validator_kind("adhoc", keys=("limit",))
+async def adhoc_validator(spec, ans, claim):
+    """`validate: {adhoc: {pattern, module, args}, limit}` — one module, run with --check."""
+    a = spec["adhoc"]
+    if not isinstance(a, dict) or not {"pattern", "module"} <= set(a) or set(a) - {"pattern", "module", "args"}:
+        return CANNOT_TELL, f"adhoc wants {{pattern, module, args}}, got {a!r}"
+    r = await ans.adhoc(str(a["pattern"]), str(a["module"]), str(a.get("args") or ""), "--check",
+                        limit=_step_limit(spec), log=claim.log)
+    hosts = _ADHOC.findall(r.text)
+    changed = sum(1 for _, st in hosts if st == "CHANGED")
+    skipped = sum(1 for _, st in hosts if st == "SKIPPED") + r.text.count('"skipped": true')
+    if r.returncode == 0 and not hosts:
+        return CANNOT_TELL, f"ansible {a['pattern']} -m {a['module']}: exit 0 but no host answered"
+    return _answer(r, changed, skipped, f"ansible {a['pattern']} -m {a['module']}")

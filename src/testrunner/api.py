@@ -87,6 +87,21 @@ class ResolverMark:
     name: str
 
 
+@dataclass
+class ValidatorMark:
+    name: str
+
+
+@dataclass
+class ValidatorKindMark:
+    name: str
+    keys: tuple[str, ...] = ()
+
+
+# A validator's three answers about one `var=value` (validate.py)
+HOLDS, DOES_NOT_HOLD, CANNOT_TELL = "holds", "does not hold", "cannot tell"
+
+
 def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None,
            produces: Mapping[str, Any] | None = None,
            produces_on: Mapping[str, Mapping[str, Any]] | None = None,
@@ -181,5 +196,27 @@ def resolver(name: str) -> Callable:
     value itself (a list stays a list)."""
     def mark(fn: Callable) -> Callable:
         setattr(fn, MARK, ResolverMark(name=name))
+        return fn
+    return mark
+
+
+def validator(name: str | None = None) -> Callable:
+    """Export a Python validator, named in the runner config as `validate: {python: <name>}`
+    (default: the function's name, `_` -> `-`). It receives `claim` (validate.Claim: var, value,
+    role, step, outcome) plus any fixtures it names, and answers: True (holds), False (does not
+    hold), None (cannot tell) — or a tuple (answer, why). An exception is "cannot tell"."""
+    def mark(fn: Callable) -> Callable:
+        setattr(fn, MARK, ValidatorMark(name=name or fn.__name__.replace("_", "-")))
+        return fn
+    return mark
+
+
+def validator_kind(name: str, *, keys: Iterable[str] = ()) -> Callable:
+    """Export a validator KIND (`validate: {<name>: value, <keys>...}`), the way an extension
+    adds `playbook:`. The function receives the RENDERED spec as `spec`, `claim`, plus any
+    fixtures it names, and returns (answer, why): answer is HOLDS, DOES_NOT_HOLD or CANNOT_TELL.
+    It must only LOOK."""
+    def mark(fn: Callable) -> Callable:
+        setattr(fn, MARK, ValidatorKindMark(name=name, keys=tuple(keys)))
         return fn
     return mark

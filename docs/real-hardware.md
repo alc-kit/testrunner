@@ -88,10 +88,14 @@ edit:
 ## Patterns that keep real hardware safe
 
 **1. The observer is the judge.**
-- Without the `expect`, a power-on the BMC accepted but never carried out would *pass*, and
-  `reinstall` would fail later for an unclear reason.
-- With it, `power-on` fails right there: `expected state not reached: power='on' (is 'off')`.
-- Mark every step whose real result is a state this way.
+- `power-on` claims `power: on`, confirmed only by `{outcome: true}` ("the command was
+  accepted"). The observer then reads the BMC. A power-on the BMC accepted but never carried out
+  contradicts the claim, and the step fails right there: `the observer reads power='off', the
+  model says 'on' — the step's claim did not hold`. The variable keeps the observed `off`.
+- The `expect` states the same intent in the plan, and keeps holding if the observer is ever
+  replaced by a validator that looks.
+- Give every value whose truth only the machine knows an observer, or a validator that looks
+  (`{run: ...}`, an `@validator`). `{outcome: true}` alone believes the step.
 
 **2. Retry on evidence, never blindly.**
 - The retry above fires only when the observer still reads `power: off`.

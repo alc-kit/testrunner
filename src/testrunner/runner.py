@@ -22,11 +22,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TextIO
 
-from .api import (ABORTED, BUILTIN_OUTCOMES, ERRORED, FAILED, PASSED, SKIPPED, Outcome, OutcomeError)
+from .api import (ABORTED, BUILTIN_OUTCOMES, CANNOT_TELL, ERRORED, FAILED, PASSED, SKIPPED, Outcome,
+                  OutcomeError)
 from .config import RunConfig, RunnerConfig, deep_merge, lookup
 from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
 from .planner import Program, Step, Walker, matrix, produced, requires_holds, when_explained, when_holds
+from .statemachine import ANY, DerivedObserver, claimer
+from .validate import BEFORE, CLAIMED, OBSERVE, Claim, Verdict, judge
+
+NOT_LOOKING = ("outcome", "const")        # validator kinds that confirm without looking at the system
 from .proc import DEFAULT_PROMPT_PATTERN, Proc
 from . import report
 from .log import STEP
@@ -136,6 +141,19 @@ class WalkFrame:
     walk: Any
     params: dict
     ctx: "StepContext"
+
+
+@dataclass
+class _ObserveCtx:
+    """The step-shaped context a derived observer's validator templates see."""
+    id: str
+
+
+@dataclass
+class _NoWalk:
+    """The frame of a step that is not a walk, for validator templates: no defaults."""
+    name: str
+    params: dict = field(default_factory=dict)
 
 
 class StepContext(Background):
@@ -508,15 +526,239 @@ class Runner:
                 STEP.reset(token)
         return blind
 
+    # ── claims: confirmed, never assumed (WP testrunner-state-validation §3.3) ──
+    async def _settle(self, run: RunContext, act: ActionSpec, ctx: StepContext, outcome: Outcome,
+                      scope: Scope, proc: Proc, results: list) -> tuple[Outcome, dict]:
+        """Apply a step's effect on every variable its claimer declares a transition for, from
+        the value it has now. A claim (the outcome is one the transition happens on) is
+        committed only when the target value's validator HOLDS. Otherwise — no claim on this
+        outcome, or a claim that did not hold — the value before and every declared target
+        are asked: exactly one may hold, and that is the value; none or several, or a "cannot
+        tell", leaves the variable UNKNOWN and fails the step with the whole story.
+        Returns the (possibly failed) outcome and the state before."""
+        before = dict(run.state)
+        ctx.looked = set()                # variables a validator that LOOKS confirmed in this step
+        by = claimer(act)
+        inner = {r.id[len(ctx.id) + 1:]: r.outcome for r in results if r.id.startswith(ctx.id + "/")}
+        failures: list[str] = []
+        for var, sv in self.rc.states.items():
+            cur = run.state.get(var)
+            here = [t for t in sv.transitions_by(by) if t.frm in (cur, ANY)]
+            if not here or cur is None and all(t.frm != ANY for t in here):
+                continue
+            claimed = {t.to for t in here if t.on == outcome.name}
+            log.info("%s: %s=%s; %s declares %s; outcome %s %s", ctx.id, var, cur, by,
+                     [t.text() for t in here], outcome.name,
+                     f"claims {var}={next(iter(claimed))}" if claimed else "claims no change")
+            asked: list[Verdict] = []
+
+            async def ask(value: str, role: str) -> Verdict:
+                v = await self._validate(sv, Claim(var, value, role, ctx.id, outcome.name, bool(claimed), inner,
+                                                f"{ctx.file_id}.validate.{var}.{value}.log"), scope, proc, ctx, act)
+                asked.append(v)
+                return v
+
+            if claimed:
+                to = next(iter(claimed))
+                v = await ask(to, CLAIMED)
+                if v.holds:
+                    run.state[var] = to
+                    if v.kind not in NOT_LOOKING:
+                        ctx.looked.add(var)
+                    if to == cur:              # a claim of the value it already had: confirmed, not a change
+                        self.journal("state_checked", step=ctx.id, var=var, value=cur, outcome=outcome.name,
+                                     verdicts=[v.record()])
+                    else:
+                        self._state_event("state_changed", ctx, var, cur, to, by, outcome.name, v)
+                    continue
+                log.warning("%s: the claim %s=%s %s: %s", ctx.id, var, to, v.answer, v.why)
+            # no claim on this outcome, or a claim that did not hold: what did it really leave?
+            candidates = ([cur] if cur is not None else []) + sorted({t.to for t in here} - {cur})
+            seen = {}
+            for value in candidates:
+                prior = next((x for x in asked if x.value == value and x.role == CLAIMED), None)
+                seen[value] = prior or await ask(value, BEFORE if value == cur else CLAIMED)
+            holding = [value for value, v in seen.items() if v.holds]
+            unsure = [v for v in seen.values() if v.answer == CANNOT_TELL]
+            if len(holding) == 1 and not unsure:
+                value = holding[0]
+                if seen[value].kind not in NOT_LOOKING:
+                    ctx.looked.add(var)
+                if value == cur and not claimed:
+                    log.info("%s: %s stays %s (checked: %s)", ctx.id, var, cur, "; ".join(v.text() for v in asked))
+                    self.journal("state_checked", step=ctx.id, var=var, value=cur, outcome=outcome.name,
+                                 verdicts=[v.record() for v in asked])
+                    continue
+                if value != cur:
+                    run.state[var] = value
+                    self._state_event("state_changed", ctx, var, cur, value, by, outcome.name, seen[value],
+                                      note=f"reached although the step ended {outcome.name}"
+                                      + (" and its claim did not hold" if claimed else ""))
+                if claimed:
+                    failures.append(self._claim_text(ctx, act, outcome, var, cur, next(iter(claimed)), value, asked))
+                continue
+            run.state[var] = None
+            why = self._unknown_text(ctx, act, outcome, var, cur, claimed, holding, asked)
+            failures.append(why)
+            self.journal("state_unknown", step=ctx.id, var=var, was=cur, outcome=outcome.name,
+                         verdicts=[v.record() for v in asked], why=why)
+        if failures:
+            for f in failures:
+                self.say(self.style.bad(f))
+            detail = "\n".join(failures)
+            if outcome.name in (PASSED, *act.outcomes, SKIPPED):
+                outcome = Outcome(FAILED, detail)
+            else:
+                outcome = Outcome(outcome.name, f"{outcome.detail}\n{detail}" if outcome.detail else detail)
+        return outcome, before
+
+    async def _validate(self, sv: Any, claim: Claim, scope: Scope, proc: Proc, ctx: StepContext,
+                     act: ActionSpec) -> Verdict:
+        """A validator, with the step's templates: {param.x} (the step's, over a walk's
+        defaults), {run.*}, {env.*}, {state.*}, the extensions' resolvers."""
+        walk = act.walk if act.kind == "walk" else self._frames[-1].walk if self._frames else None
+        self._frames.append(WalkFrame(walk or _NoWalk(act.name), ctx.params, ctx))
+        try:
+            return await judge(self.reg, sv, claim, fixtures=self.fixtures, scope=scope, proc=proc,
+                               resolve=self._resolver(scope, ctx), root=self.rc.root)
+        finally:
+            self._frames.pop()
+
+    def _state_event(self, event: str, ctx: StepContext, var: str, was: Any, to: Any, by: str, outcome: str,
+                     v: Verdict, note: str = "") -> None:
+        log.info("%s: %s %s -> %s (claimed by %s on %s; confirmed by %s %s)%s", ctx.id, var, was, to, by, outcome,
+                 v.kind, v.spec_text(), f" — {note}" if note else "")
+        self.say(self.style.dim(f"     {var}: {was} -> {to}  (confirmed by {v.kind} {v.spec_text()}"
+                                f"{'; ' + note if note else ''})"))
+        self.journal(event, step=ctx.id, var=var, **{"from": was}, to=to, claimed_by=by, outcome=outcome,
+                     confirmed_by=v.record(), **({"note": note} if note else {}))
+
+    def _claim_text(self, ctx: StepContext, act: ActionSpec, outcome: Outcome, var: str, cur: Any, to: str,
+                    found: Any, asked: list) -> str:
+        return (f"{ctx.id} ({act.name}) ended {outcome.name} and claimed {var}={to}, which did not hold; "
+                f"{var} is {found} (it was {cur}).\n" + "\n".join(f"    {v.text()}" for v in asked))
+
+    def _unknown_text(self, ctx: StepContext, act: ActionSpec, outcome: Outcome, var: str, cur: Any,
+                      claimed: set, holding: list, asked: list) -> str:
+        """The whole story of an indeterminate variable (D6): the step, its claim, every
+        validator's answer and why, what is blocked now, where to look, what to do."""
+        blocked = sorted(a.name for a in self.reg.actions.values() if var in a.requires and a.inner_of is None)
+        claim = f"claimed {var}={next(iter(claimed))}" if claimed else f"claimed no change of {var}"
+        if holding:
+            found = f"{len(holding)} values hold at once ({', '.join(map(str, holding))})"
+        elif any(v.answer == CANNOT_TELL for v in asked):
+            found = "a validator could not tell"
+        else:
+            found = "no value holds"
+        logs = sorted({f"{ctx.file_id}.validate.{v.var}.{v.value}.log" for v in asked
+                       if v.kind not in ("outcome", "const", "python")})
+        return "\n".join([
+            f"{ctx.id} ({act.name}): cannot determine {var} — the step ended {outcome.name}"
+            + (f" ({outcome.detail.splitlines()[0]})" if outcome.detail else "") + f" and {claim}; it was {cur}.",
+            f"  {found}:",
+            *[f"    {v.text()}" for v in asked],
+            f"  {var} is now UNKNOWN: no step that requires it will run"
+            + (f" ({', '.join(blocked)})" if blocked else "") + ", and the scenario is not released.",
+            f"  look at: the step's log{'s' if logs else ''} under {self.store.path('logs')}"
+            + (f" ({', '.join(logs)})" if logs else "") + ", and the trace.",
+            "  next: inspect the system; `testrunner --plan` reads it again through the observers; or tear it down.",
+        ])
+
+    async def _reobserve_after(self, run: RunContext, scope: Scope, ctx: StepContext, act: ActionSpec,
+                               outcome: Outcome) -> Outcome:
+        """Reality after a step. A value the model does not know is learned. A value the
+        observer reads DIFFERENTLY from the model fails the step (D4: either one is proof, and
+        both must agree):
+        - the model's value was confirmed in this step by a validator that LOOKED: two looks
+          contradict each other, and the variable is UNKNOWN;
+        - otherwise (an outcome/const validator, or a value from an earlier step): the observer
+          is the only one that looked, so its reading stands — the step's claim did not hold,
+          or the step changed the variable without declaring it."""
+        sid = ctx.id
+        model = dict(run.state)
+        await self._reobserve(run, scope, sid)
+        looked = getattr(ctx, "looked", set())
+        clashes = []
+        for var in self.reg.observers:
+            was, seen = model.get(var), run.state.get(var)
+            if was is None or seen == was:
+                continue
+            claimed_here = any(t.by == claimer(act) for t in self.rc.states[var].transitions)
+            walks = [f.walk.name for f in self._frames if f.walk is not None]
+            covering = [t for t in self.rc.states[var].transitions
+                        if t.by in walks and t.frm in (was, ANY) and t.to == seen]
+            if covering and var not in looked:
+                # an inner step made a change its enclosing walk declares: the walk's claim, seen early
+                t = covering[0]
+                log.info("%s: observed %s %s -> %s, which the enclosing walk %s declares (%s)", sid, var, was, seen,
+                         t.by, t.text())
+                self.journal("state_changed", step=sid, var=var, **{"from": was}, to=seen, claimed_by=t.by,
+                             outcome=outcome.name, confirmed_by={"kind": "observer", "answer": "holds"},
+                             note=f"observed inside the walk {t.by}, which declares it")
+                continue
+            if var in looked:
+                run.state[var] = None
+                why = (f"{sid} ({act.name}): the observer reads {var}={seen!r}, but this step's validator "
+                       f"confirmed {var}={was!r} — two looks disagree, so {var} is now UNKNOWN (no step that "
+                       f"requires it will run, and the scenario is not released). Look at the step's validator "
+                       f"log and the trace; `testrunner --plan` reads it again.")
+                self.journal("state_unknown", step=sid, var=var, was=was, observed=seen, outcome=outcome.name,
+                             why=why)
+            else:
+                why = (f"{sid} ({act.name}): the observer reads {var}={seen!r}, the model says {was!r} — "
+                       + ("the step's claim did not hold" if claimed_here else
+                          f"the step changed {var} without declaring it")
+                       + f"; {var} is {seen!r}, as observed.")
+                self.journal("state_changed", step=sid, var=var, **{"from": was}, to=seen, claimed_by=None,
+                             outcome=outcome.name, confirmed_by={"kind": "observer", "answer": "holds"},
+                             note="the observer contradicts the model")
+            clashes.append(why)
+            self.say(self.style.bad(why))
+        if not clashes:
+            return outcome
+        detail = "\n".join(clashes)
+        if outcome.name in (PASSED, *act.outcomes, SKIPPED):
+            return Outcome(FAILED, detail)
+        return Outcome(outcome.name, f"{outcome.detail}\n{detail}" if outcome.detail else detail)
+
     async def _observe(self, var: str, scope: Scope) -> Any:
         fn = self.reg.observers[var]
         log.debug("observer %s: calling %s", var, _fn_name(fn))
         t = time.monotonic()
-        value = await call(fn, await self.fixtures.kwargs_for(fn, scope))
+        if isinstance(fn, DerivedObserver):
+            value = await self._observe_in_order(fn.sv, scope)
+        else:
+            value = await call(fn, await self.fixtures.kwargs_for(fn, scope))
         log.info("observer %s says %r (%.2fs)", var, value, time.monotonic() - t)
         if value is not None and value not in self.rc.states[var]["values"]:
             raise FixtureError(f"observer for {var} returned {value!r}, not one of {self.rc.states[var]['values']}")
         return value
+
+    async def _observe_in_order(self, sv: Any, scope: Scope) -> str:
+        """An observer derived from validators (observe: {order}): the first value that holds.
+        Validators run outside any step here, with the run's fixtures; a template's {param.x}
+        comes from the run config."""
+        proc = Proc(self.rc.root, self.store.path("logs", "x").parent, secrets=self.secrets)
+        found, data = scope.find("config")
+        params = ((data if found else self.run_config.data) or {}).get(self.rc.params_section) or {}
+        ctx = _ObserveCtx(f"(observe {sv.name})")
+        self._frames.append(WalkFrame(_NoWalk(f"observe {sv.name}"), params, ctx))
+        try:
+            asked = []
+            for value in sv.order:
+                v = await judge(self.reg, sv, Claim(sv.name, value, OBSERVE, log=f"observe.{sv.name}.{value}.log"),
+                                fixtures=self.fixtures, scope=scope, proc=proc,
+                                resolve=self._resolver(scope, ctx), root=self.rc.root)
+                asked.append(v)
+                if v.holds:
+                    return value
+                if v.answer == CANNOT_TELL:
+                    break
+        finally:
+            self._frames.pop()
+        raise FixtureError(f"cannot read {sv.name} in order {sv.order}: "
+                           + "; ".join(v.text() for v in asked)
+                           + ("" if asked[-1].answer == CANNOT_TELL else " — no value holds"))
 
     async def _retry_wanted(self, run: RunContext, run_scope: Scope, step: Step, sr: StepResult, attempt: int,
                             index: str, data: dict, program: Program, prefix: str = "") -> tuple[bool, str]:
@@ -608,6 +850,7 @@ class Runner:
         run.last_output = ""
         if not self.dry:                  # hooks of a step are about RUNNING it
             await self.hook("step_start", run=run, step=ctx)
+        settled: dict | None = None       # the state before the step, once its effects are settled
         ok, unknown = requires_holds(act.requires, run.state)
         log.info("%s: requires %s against state %s -> %s", sid, act.requires or "{}", run.state,
                  "unknown value(s) " + ", ".join(unknown) if ok and unknown else "holds" if ok else "DOES NOT HOLD")
@@ -632,11 +875,26 @@ class Runner:
                         show_command=(lambda line: self.say(self.style.dim(line))) if self.show_commands else None)
             scope = Scope("step", {"step": ctx, "params": params, "proc": proc,
                                    "state": StateView(run.state)}, parent=run_scope)
+            first_result = len(run.results)          # a walk's inner steps' results follow
             outcome = await self._execute(act, scope, ctx, step_data, program=program, step=step)
             run.last_output = "\n".join(proc.transcript)
             log.info("%s: the action ended %s%s (%.1fs)", sid, outcome.name,
                      f" — {outcome.detail}" if outcome.detail else "", time.monotonic() - started)
             problems = await ctx.finish()
+            if problems and outcome.name == PASSED:
+                log.warning("%s: passed, but %s -> failed", sid, "; ".join(problems))
+                outcome = Outcome(FAILED, "; ".join(problems))
+                problems = []
+            if outcome.name not in act.all_outcomes:
+                log.error("%s: outcome %r is not declared by %s (declares %s) -> errored", sid, outcome.name,
+                          act.name, sorted(act.all_outcomes))
+                outcome = Outcome(ERRORED, f"returned undeclared outcome {outcome.name!r} ({outcome.detail})")
+            if not self.dry:
+                # every claim is CONFIRMED by its validator, and a step that claims nothing (or
+                # whose claim failed) is checked for what it really left — while the step's
+                # fixtures still exist, so a validator can use them
+                outcome, settled = await self._settle(run, act, ctx, outcome, scope, proc,
+                                                      run.results[first_result:])
             try:
                 log.debug("%s: closing the step scope (step fixtures tear down in reverse order)", sid)
                 await scope.close()
@@ -650,14 +908,19 @@ class Runner:
             log.error("%s: outcome %r is not declared by %s (declares %s) -> errored", sid, outcome.name,
                       act.name, sorted(act.all_outcomes))
             outcome = Outcome(ERRORED, f"returned undeclared outcome {outcome.name!r} ({outcome.detail})")
-        # state: what the outcome produces, then what reality says
-        before = dict(run.state)
-        changed = produced(act, outcome.name, run.state) if outcome.name not in (ERRORED, ABORTED) else {}
-        run.state.update(changed)
-        log.info("%s: outcome %s produces %s (%s) -> state %s", sid, outcome.name, changed or "nothing",
-                 "errored/aborted produce nothing" if outcome.name in (ERRORED, ABORTED)
-                 else f"declared: {act.produces if outcome.name == PASSED else act.produces_on.get(outcome.name, {})}",
-                 run.state)
+        # state: what the outcome produces (confirmed by the validators, above), then what
+        # reality says
+        if settled is not None:
+            before = settled
+        else:
+            # not settled: a dry run (the model carries the walk), or a step that never ran
+            before = dict(run.state)
+            changed = produced(act, outcome.name, run.state) if outcome.name not in (ERRORED, ABORTED) else {}
+            run.state.update(changed)
+            log.info("%s: outcome %s produces %s (%s) -> state %s", sid, outcome.name, changed or "nothing",
+                     "errored/aborted produce nothing" if outcome.name in (ERRORED, ABORTED)
+                     else f"declared: {act.produces if outcome.name == PASSED else act.produces_on.get(outcome.name, {})}",
+                     run.state)
         expect = program.expected(step.id)
         # Reality after EVERY step, whatever its outcome: a step that failed (or was
         # aborted) half-way can still have changed the system — measured 2026-10-11: an
@@ -670,7 +933,7 @@ class Runner:
             # nothing was changed, so reality would only undo the walk's own model of it
             log.debug("%s: dry run: reality not re-read (the model carries the walk)", sid)
         else:
-            await self._reobserve(run, run_scope, sid)
+            outcome = await self._reobserve_after(run, run_scope, ctx, act, outcome)
         if outcome.name == expect.outcome:
             wrong = {k: (v, run.state.get(k)) for k, v in expect.state.items() if run.state.get(k) != v}
             log.debug("%s: expected outcome %s reached; expect.state %s -> %s", sid, expect.outcome,

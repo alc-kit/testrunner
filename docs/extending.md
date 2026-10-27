@@ -25,7 +25,8 @@ subscriber's `state_dir`. A subscriber pulls testrunner in as a git subtree and 
 |---|---|---|
 | DO something to the system (install, power on, break a disk) | **action** | `@action(...)` in a module listed in `modules:`, or a shell export under `actions:` |
 | give steps something they NEED (a client, a connection, credentials) | **fixture** | `@fixture(scope="run"\|"step")`; set up on first use, torn down at the scope's end, also after a failure |
-| READ what the system IS (power, version, membership) | **observer** | `@observer("<state var>")`; asked before the plan is judged, at run start, after every state-changing step |
+| READ what the system IS (power, version, membership) | **observer** | `@observer("<state var>")`; asked before the plan is judged, at run start, after every state-changing step. Or `observe: {order: [...]}`, derived from the validators |
+| CONFIRM that a claimed value holds (a step said "installed": is it?) | **validator** | `validate:` per value in `states:` — `{run: ...}`, `{playbook: ...}`, `{python: <name>}` (an `@validator`), or as weak as `{outcome: true}`; an extension adds kinds with `@validator_kind` |
 | act AROUND steps (refuse a run, adjust the config, record metrics) | **hook** | `@hook("run_config"\|"run_start"\|"step_start"\|"step_end"\|"run_end")` |
 | run one thing in several orders, with other parameters | **run config** | `configs/<name>.yml`: `extends:`, `plan:`, `edit:`, `actions:`, `uses:`, parameters |
 | share any of the above between frameworks | **extension** | a package; settings under `ext: {<name>: ...}` (below) |
@@ -47,9 +48,13 @@ The state model is the framework's spine. Everything else is judged against it.
 2. **Values form a lifecycle,** and actions move along it. Use a transition map,
    `produces: {rig: {up: installed}}`, when re-running a step on a system that is further along must
    not move it backwards.
-3. **Reality wins.** After a state-changing step, whatever its outcome, the observers read again,
-   and what they read replaces what the step claimed. A step that failed half-way is judged by
-   what it left behind.
+3. **Every claim is confirmed; nothing is assumed.** Declare every transition in `states:` (the
+   actions' `produces` must agree), and give every value a validator. A claim is committed only
+   when its validator holds. After a step that claims nothing, or whose claim did not hold, the
+   value before and every reachable value are asked, and exactly one may hold; otherwise the
+   variable is unknown and the step fails. The observers read again after every state-changing
+   step: if they contradict the model, the step fails. Choose each validator's strength
+   deliberately. `{outcome: true}` writes down "the step passed, so it holds"; a probe looks.
 4. **Make the observer the judge where "done" is a state.** `expect: {power-on: {state: {power: on}}}`
    turns "the command exited 0" into "the chassis is on". Without it, a power-on the BMC accepted but
    never carried out would pass.
@@ -155,7 +160,10 @@ repository, on its `pythonpath:`, until a second one needs it.
 
 - [ ] `testrunner.yml`: `modules`, `states` (each one readable by an observer), `paths`,
       `configs`, `state_dir`, `scenario.release_when` (on an OBSERVED state).
-- [ ] An observer for every state variable.
+- [ ] Every transition declared under `states:` and claimed by its action (they must agree).
+- [ ] A validator for every value a transition touches, each proven both ways: it holds in the
+      state it checks, and does not hold one state earlier.
+- [ ] An observer for every changing state variable (or `observe: {order}`, or `model_only: true`).
 - [ ] Actions with declared contracts; read-only ones marked `readonly=True`.
 - [ ] `expect` wherever "done" is a state, not an exit code.
 - [ ] Destructive actions behind a prompt that a drive rule answers with the target's name.

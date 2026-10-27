@@ -265,3 +265,14 @@ def check_declarations(reg: Any, states: dict[str, StateVar]) -> None:
     if problems:
         raise ConfigError("the state machine is not fully declared (undefined behaviour is a failure):\n"
                           + "\n".join(problems))
+
+
+class DerivedObserver:
+    """The observer of a variable that declares `observe: {order: [...]}`: its validators are
+    asked in that order, and the first value that HOLDS is the answer. A value that cannot
+    tell, or no value holding, means it cannot look (the runner keeps the model's value and
+    says so). The runner calls it (runner._observe); it is registered like an @observer."""
+
+    def __init__(self, sv: StateVar):
+        self.sv = sv
+        self.__name__ = f"observe-in-order({sv.name}: {', '.join(sv.order or [])})"
