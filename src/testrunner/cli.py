@@ -49,6 +49,7 @@ from .scenario import describe, new_run_id, select
 from .store import LockedError, Store
 from .term import Style, color_enabled
 from .ui import InputBroker
+from .validate import spec_text
 
 EXIT_FAILED, EXIT_USAGE = 1, 2
 
@@ -461,9 +462,16 @@ def listing(rc, reg) -> int:
             print(f"  {name}: {steps}")
     if rc.states:
         print("states:")
-        for var, spec in rc.states.items():
-            obs = "  (observed)" if var in reg.observers else ""
-            print(f"  {var}: {spec['values']}  initial {spec.get('initial')}{obs}")
+        for var, sv in rc.states.items():
+            how = (f"observed in order {sv.order}" if sv.order else "observed" if var in reg.observers
+                   else "model only" if sv.model_only else "constant" if not sv.transitions else "?")
+            print(f"  {var}: {sv.values}  initial {sv.initial}  ({how})")
+            for value in sv.values:
+                v = sv.validators.get(value)
+                print(f"    {value:<14} {sv.criteria.get(value, '(no criterion)')}"
+                      + (f"  — validate {{{spec_text(v)}}}" if v else ""))
+            for t in sv.transitions:
+                print(f"    {t.frm} -> {t.to}  by {t.by} on {t.on}")
     if reg.fixtures:
         print("fixtures:")
         for f in reg.fixtures.values():

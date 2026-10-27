@@ -118,3 +118,48 @@ def test_no_whole_run_tile_without_a_matching_earlier_run(tmp_path):
     _fake(s, "a", [("up", 5)], 0)
     _fake(s, "b", [("up", 80), ("install", 450)], 0)
     assert "vs previous run" not in render(runs_from_journal(s))
+
+
+# ── state changes and the state machine (WP testrunner-state-validation) ────
+
+def test_both_reports_show_every_state_change_and_what_decided_it(toy, capsys):
+    code, out = toy.run("--report", "--report-format", "both", capsys=capsys)
+    assert code == 0, out
+    md = (toy.root / "state/reports/latest.md").read_text()
+    assert "## State changes" in md and "| service | absent | running |" in md      # start and end
+    assert "| install | service | absent → installed | passed | outcome (outcome: true) — install ended passed" in md
+    assert "## State machine" in md and "### service" in md
+    assert "| installed | the service file says installed | outcome: true |" in md
+    assert "| * | installed | install | passed |" in md
+    assert "read back: observed" in md and "read back: model only" in md
+    page = (toy.root / "state/reports/latest.html").read_text()
+    assert "<h2>State changes</h2>" in page and "absent → installed" in page
+    assert "<h2>State machine</h2>" in page and "the service file says installed" in page
+
+
+def test_a_variable_that_became_unknown_is_marked_in_the_reports(sub, capsys):
+    from test_validate import make_sub
+    s = make_sub(sub)
+    s.write("unsure", "")
+    from conftest import main
+    code = main(["--root", str(s.root), "--color", "never", "--non-interactive", "make", "--report",
+                 "--report-format", "both"])
+    capsys.readouterr()
+    assert code == 1
+    md = (s.root / "state/reports/latest.md").read_text()
+    assert "| make | sys | absent → ❌ unknown | passed |" in md
+    assert "up cannot tell (run)" in md and "make (make): cannot determine sys" in md
+    assert "| sys | absent | unknown |" in md
+    assert "absent → unknown" in (s.root / "state/reports/latest.html").read_text()
+
+
+def test_control_a_journal_from_before_the_state_machine_renders_without_it(tmp_path):
+    # an old journal has no machine and no state events: no empty sections
+    store = Store(tmp_path / "state")
+    store.journal.append("run_start", run="r1", config="x.yml", steps=["a"])
+    store.journal.append("step_start", run="r1", step="a", action="a")
+    store.journal.append("step_end", run="r1", step="a", action="a", outcome="passed", seconds=1)
+    store.journal.append("run_end", run="r1", passed=True, why="")
+    from testrunner.report import render_markdown
+    md = render_markdown(runs_from_journal(store))
+    assert "## State changes" not in md and "## State machine" not in md

@@ -34,11 +34,30 @@ Further reading:
 
 ## Concepts
 
-**States.** The subscriber declares variables that describe the system under test:
+**States.** The subscriber declares the whole state machine in the runner config: each
+variable's values, what each value means (`criterion`), how a claimed value is confirmed
+(`validate`), and every transition, meaning which action may change the variable, on which
+outcome, from which value to which:
 ```yaml
 states:
-  service: {values: [absent, installed, running], initial: absent}
+  service:
+    initial: absent
+    validate: {outcome: true}          # every value's validator, unless a value names its own
+    values:
+      absent:    {criterion: "no service file"}
+      installed: {criterion: "the service file says installed"}
+      running:   {criterion: "the service file says running"}
+    transitions:
+      - {from: absent, to: installed, by: install, on: passed}
+      - {from: "*",    to: running,   by: start,   on: passed}
 ```
+The actions declare the same changes in their `produces` (below). **The two must agree, line
+for line**: a claim the runner config does not declare, a declared transition no action
+claims, or the same change on a different outcome makes the plan **undecided**. It is refused
+before anything runs, with every mismatch listed. The list of transitions is complete: an
+action/outcome pair that is not in it changes nothing. Undefined behaviour is a failure, never
+a default. See [State machine](#state-machine) for the rest of the declaration (validators,
+observers, `model_only`).
 
 **Actions** are the exported functions, each with a contract:
 ```python
@@ -72,7 +91,9 @@ actions:
 
 `produces` can also be a **transition map**: `produces: {rig: {up: installed}}` moves
 `up` to `installed` and leaves any other value alone, so re-running an idempotent step
-on a system that is further along does not move it backwards.
+on a system that is further along does not move it backwards. The runner config declares it
+as `{from: up, to: installed, by: <action>, on: passed}`. A plain `produces: {rig: absent}`
+changes the variable from any value, and is declared `from: "*"`.
 
 **Fixtures** — built in: `run`, `config`, `store`, `ui`, `registry` (per run) and `step`,
 `params`, `proc`, `state` (per step). Your own:
@@ -86,13 +107,26 @@ async def api(config):
     await client.close()          # teardown, also after a failure
 ```
 
-**Observers** read reality; where one exists, it wins over what an action claimed:
+**Observers** read reality:
 ```python
 @observer("service")
 def service_state(api): return api.status()
 ```
 They are asked before the plan is judged, when the run starts, and after every step, whatever
-its outcome, except after a `readonly` action, which only looks.
+its outcome, except after a `readonly` action, which only looks. At the start, what they read
+replaces the stored state. After a step, an observer that contradicts the model FAILS the step
+(see [State machine](#state-machine)).
+
+**Validators** confirm a claimed value: `validate:` in the runner config, as a command, an
+`@validator` function, an extension's kind (`playbook:`), or as weak as "the step passed"
+(`{outcome: true}`). A claim is committed only when its validator holds:
+```python
+from testrunner import validator
+
+@validator()                      # validate: {python: service-is}
+def service_is(claim, api):
+    return api.status() == claim.value, f"the API says {api.status()}"
+```
 
 **Hooks**: `run_start`, `step_start`, `step_end`, `run_end` — `@hook("step_end")`; a
 hook receives only the arguments it names (`run`, `step`, `result`).
@@ -130,14 +164,86 @@ on the config) and `max_visits:` (a bound for `goto` loops).
 A run is a walk over a state machine. Every part of it is declared, and `--plan --matrix`
 prints the whole of it as a table, which also goes in the journal and both reports.
 
-- **States**: the runner config's `states:` (e.g. `rig: [absent, up, installed, clustered]`).
-  Observers read the real value, and it wins over the model.
+- **States**: the runner config's `states:`, each variable with:
+  - `values`: a list of names, or a mapping `{<value>: {criterion, validate}}`;
+  - `initial`: the value before anything ran (leave it out when only an observer knows);
+  - `criterion`: what a value MEANS, in a sentence. It is shown by `--list`, and later in the
+    plan and reports;
+  - `validate`: how a claimed value is confirmed: once for the variable, or per value. Every
+    value a transition touches must have one, or the plan is refused;
+  - `transitions`: every change, as `{from, to, by, on}`, all four stated. `from: "*"` means
+    from any value. An inner step of a walk action is `by: <walk>/<step id>`;
+  - how it is read back. Exactly one of these applies to a variable a transition changes:
+    - an `@observer`;
+    - `observe: {order: [...]}`, an observer derived from the validators;
+    - `model_only: true`: nothing re-reads it, and its value is what the steps claimed.
+
+    A variable that no transition changes is a constant (its `initial`).
+
+  Observers read the real value at run start, and it wins over the stored model.
+- **Agreement**: the transitions declared in the runner config and the actions' `produces` /
+  `produces_on` must match, line for line, outcomes included. If they don't, the plan is
+  UNDECIDED and refused before anything runs (`--list`, `--plan` and every run). An inner step
+  that calls an action without effects of its own carries that action's claims, which are
+  checked once, as that action's.
 - **Events**: a step's outcome: `passed`, `failed`, `errored`, `aborted`, `skipped`, or a named
   one the action declares (`outcomes=["degraded"]`).
 - **Guards**: an action's `requires` (the states it may start from). Checked before it runs, and
   statically over every branch before the run starts.
 - **Effects**: an action's `produces` (on `passed`) and `produces_on` (per outcome): the state it
-  leaves. The observers then read what it really left.
+  CLAIMS to leave. A claim is never taken on trust (next bullets).
+- **Validators** answer one question for one value: does it hold now? There are three answers:
+  *holds*, *does not hold*, *cannot tell*. How strong a validator is, is the subscriber's to
+  decide and to describe. Every record says which validator confirmed what.
+
+  | kind | holds | does not hold | cannot tell |
+  |---|---|---|---|
+  | `{outcome: true}` | the claiming step ended on the outcome that claims the change | it did not | — |
+  | `{outcome: [id, ...]}` | these inner steps of the claiming walk passed (e.g. build and fetch) | one did not | — |
+  | `{const: true}` | always: the claim needs no check | — | — |
+  | `{run: [argv] or "shell", env, cwd, timeout}` | exit 0 | exit 1 | any other exit, a timeout, a prompt |
+  | `{python: <name>}` (an `@validator`) | `True` | `False` | `None`, or it raises |
+  | `{playbook: <path>, limit, extra, args, timeout}` (`ext.ansible`) | exit 0 | exit 2 (a task failed) | exit 4 (unreachable), any other; or `changed` under `--check` |
+  | `{adhoc: {pattern, module, args}, limit}` (`ext.ansible`) | exit 0 | exit 2 | exit 4, any other; or a host `CHANGED` or `SKIPPED` |
+
+  - Their values are templates like a walk step's (`{param.node}`, `{run.root}`, `{env.X}`).
+  - `playbook:` and `adhoc:` always run with `--check`: a validator only looks. Under `--check`,
+    ansible SKIPS `command`/`shell` tasks. Give a read-only command task `check_mode: false`, or
+    the validator proves nothing. An ad-hoc command that was skipped answers *cannot tell*.
+  - `run:` and `python:` validators cannot be forced to only look. Whoever writes one promises it.
+  - An extension adds a kind with `@validator_kind("<name>", keys=(...))`. Its function returns
+    `(answer, why)`.
+- **Claims are confirmed.** After a step, for every variable its action declares a transition
+  for, from the value the variable has now:
+  - **The outcome claims a change**: the target value's validator is asked. If it *holds*, the
+    change is committed and journalled as `state_changed`, with the validator that confirmed it.
+    Otherwise the step **fails**, and the variable is checked as below.
+  - **The outcome claims nothing, or the claim did not hold** (a failed, errored or aborted
+    step; a refused claim): nothing is assumed. The value before, and every value the action's
+    transitions could lead to, are asked:
+    - exactly one holds: that is the value (`state_checked` when it is unchanged; `state_changed`,
+      "reached although the step ended failed", when it moved);
+    - none holds, several hold, or one cannot tell: the variable becomes **unknown**, and the
+      step fails. Its error tells the whole story: the claim, every validator's answer and why,
+      what is blocked (steps that require the variable do not run; the scenario is not
+      released), which logs to read, and what to do next. It is journalled as `state_unknown`.
+  - A dry run asks no validator: the model carries the walk.
+- **Observers and validators** are both proof, and when both answer they must agree. After a
+  step, an observer that reads a different value from the model fails the step:
+  - if this step's validator LOOKED (anything but `outcome:`/`const:`), two looks disagree, and
+    the variable is **unknown**;
+  - otherwise the observer is the only one that looked, so its reading stands: the step's claim
+    did not hold, or the step changed the variable without declaring it;
+  - inside a walk, an observed change that the enclosing walk declares (from the value the
+    variable had, to the value now seen) is that walk's claim, seen early. It is recorded, not
+    failed;
+  - a value the model does not know (unknown) is learned from the observer.
+- **Observers derived from validators**: `observe: {order: [clustered, installed, up, absent]}`
+  asks each value's validator in that order, and the first that holds is the value. An earlier
+  value that *cannot tell* stops the search: the observer cannot look, and the run warns and keeps
+  the model's value. Only validators that look can be asked, so an `outcome:`/`const:` validator in
+  the order is refused. The validators run outside any step, with the run's fixtures; a
+  `{param.x}` comes from the run config.
 - **Transitions**: what comes next, decided by how the step ENDED. Two forms:
   ```yaml
   on:
@@ -145,7 +251,7 @@ prints the whole of it as a table, which also goes in the journal and both repor
     join:                              # rules on outcome AND the observed state; first match wins
       - when: {outcome: passed, state: {rig: clustered}}   # the marker that means "go on"
         then: continue
-      - when: {outcome: passed, state: {rig: installed}}   # joined, but no cluster formed
+      - when: {outcome: failed, state: {rig: installed}}   # its claim did not hold: no cluster formed
         then: {goto: form}
       - when: {outcome: failed}
         then: [membership]                                 # run these, then go on
@@ -162,12 +268,12 @@ prints the whole of it as a table, which also goes in the journal and both repor
 
 ```
 $ testrunner --plan --matrix          # the join step of the example above
-  step    | requires (state in)      | outcome (event) | state after    | next
-  --------+--------------------------+-----------------+----------------+------------------------------------
-  join    | rig: installed|clustered | passed*         | rig: clustered | outcome passed rig=clustered -> continue; outcome passed rig=installed -> goto form; otherwise -> stop (failed)
-          |                          | failed          | (unchanged)    | outcome failed -> run membership, then go on
-          |                          | errored         | (unchanged)    | otherwise -> stop (failed)
-          |                          | aborted         | (unchanged)    | stop (aborted)
+  step    | requires (state in)      | outcome (event) | state after                               | next
+  --------+--------------------------+-----------------+-------------------------------------------+------------------------------------
+  join    | rig: installed|clustered | passed*         | rig: clustered                            | outcome passed rig=clustered -> continue; otherwise -> stop (failed)
+          |                          | failed          | (checked: unchanged, reached, or unknown) | outcome failed rig=installed -> goto form; outcome failed -> run membership, then go on
+          |                          | errored         | (checked: unchanged, reached, or unknown) | otherwise -> stop (failed)
+          |                          | aborted         | (checked: unchanged, reached, or unknown) | stop (aborted)
 ```
 
 **Editing a walk.** A run config's `edit:` list changes the walk its plan compiles to, without
@@ -465,6 +571,16 @@ lines of that step's log, with colour codes stripped and NOLOG values already ma
 The **HTML** page shows the same run as charts: a timeline coloured by outcome, and each
 step's change against earlier runs. It needs nothing external, so it opens offline.
 
+Both formats also carry the **state**:
+- **State changes**: each variable at the start and at the end, then every change a step
+  claimed, with the validator (or observer) that confirmed it and its reason. Values checked and
+  kept after a step that claimed nothing are listed too, and a value that became **unknown** is
+  marked, with what each validator answered.
+- **State machine**: the machine as declared when the run started. That is, per variable: how it
+  is read back, each value with its criterion and validator, and every transition.
+- **State/event matrix**: per step and outcome, the state it needs, the state it leaves, and
+  what comes next.
+
 Both are built from the journal alone, so any past run can be reported afterwards. An
 action or a `step_end` hook can add its own numbers with `step.metric("tasks", 779)`;
 they are recorded in the journal and shown in both formats.
@@ -672,7 +788,7 @@ pythonpath: [lib/]             # directories those modules import from
 actions: {...}                 # shell exports, and walk actions (an entry with steps:)
 action_files: [actions/*.yml]  # more walk actions, one `actions:` mapping per file
 state_dir: state               # the subscriber's state (journal, state, scenario, logs)
-states: {...}
+states: {...}                  # the state machine: values, criteria, validators, transitions
 paths: {lifecycle: [install, start, seed, verify]}
 default_path: lifecycle        # what ranges slice (implied when there is one path)
 all: {fallback: lifecycle}     # what `all` runs when the plan is empty (no path may be named `all`)

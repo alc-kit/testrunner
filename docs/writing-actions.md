@@ -18,6 +18,22 @@ Before you write any code, answer four questions. They become the decorator's ar
 If the contract needs a state value that doesn't exist yet, add it to `states:` in
 `testrunner.yml` first. A value nobody declared is refused when the actions are loaded.
 
+**Every change in `produces` / `produces_on` is also declared in `testrunner.yml`**, under the
+variable's `transitions:`, with the action's name and the outcome:
+```yaml
+states:
+  data:
+    values: [empty, balanced]
+    validate: {outcome: true}
+    transitions:
+      - {from: "*", to: balanced, by: rebalance, on: passed}
+    model_only: true
+```
+If the two sides disagree, the plan is undecided and refused before anything runs. The error
+lists each line and which side it is missing from. A changed variable also needs a validator
+for every value its transitions touch, and a way to be read back: an `@observer`, an
+`observe: {order}`, or `model_only: true` (README, "State machine").
+
 ## 2. Write it
 
 Write it in Python (preferred, async where it waits on anything):
@@ -105,6 +121,8 @@ plan:
    disagree, so fix one of them before you run anything.
 2. **A negative control.** Write the input the action *must* refuse or fail on, and run it
    with `expect: {<step>: {outcome: failed}}`. A check that has never failed proves nothing.
+   The same goes for each validator: run it once where its value holds, and once one state
+   earlier, where it must not.
 3. **A real run** of the shortest range that reaches it (`testrunner join..rebalance`),
    then the full plan.
 

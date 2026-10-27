@@ -12,7 +12,13 @@ from testrunner.proc import Proc
 
 RUNNER = """
 modules: [m.py]
-states: {s: {values: [a, b], initial: a}}
+states:
+  s:
+    values: [a, b]
+    initial: a
+    validate: {outcome: true}
+    model_only: true
+    transitions: [{from: "*", to: b, by: flip, on: passed}]
 actions:
   sh-ok:
     run: 'echo shell-said-hello'
@@ -67,9 +73,9 @@ def test_a_run_leaves_a_trace_with_its_decisions(sub, capsys):
     assert "trace: " in out                               # the operator is told where it is
     # config selection and why
     assert re.search(r"run config: no --config.*the default .*default\.yml", t)
-    # requires judged against the state, and what the outcome produced
+    # requires judged against the state, and what the outcome produced: the claim and its confirmation
     assert "flip: requires {'s': 'a'} against state {'s': 'a'} -> holds" in t
-    assert re.search(r"flip: outcome passed produces \{'s': 'b'\}", t)
+    assert re.search(r"flip: s a -> b \(claimed by flip on passed; confirmed by outcome outcome: true\)", t)
     # a when: explained key by key, with the value the config holds
     assert "gated: when — params.flavour: have 'plain', want 'fancy' -> NO" in t
     assert "gated: skipped — when does not hold" in t

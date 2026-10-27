@@ -16,7 +16,12 @@ RUNNER = """
 modules: [mod.py]
 action_files: [walks/*.yml]
 states:
-  late: {values: [absent, created, installed, joined], initial: absent}
+  late:
+    values: [absent, created, installed, joined]
+    initial: absent
+    validate: {outcome: true}
+    model_only: true
+    transitions: @T@
 paths:
   full: [grow]
 default_path: full
@@ -52,6 +57,11 @@ def is_member(params):
 def hosts(arg):
     return [h for h in ["h1", "h2", "h3"] if not arg or h != arg]
 """
+# the transitions GROW's inner steps claim, as the runner config must declare them
+GROW_T = """
+      - {from: absent, to: created, by: grow/create, on: passed}
+      - {from: created, to: installed, by: grow/install, on: passed}
+      - {from: installed, to: joined, by: grow/join, on: passed}"""
 GROW = """
 actions:
   grow:
@@ -66,16 +76,21 @@ actions:
 
 @pytest.fixture
 def s(sub):
-    sub.write("testrunner.yml", RUNNER)
+    sub.write("testrunner.yml", RUNNER.replace("@T@", GROW_T))
     sub.write("mod.py", MOD)
     sub.write("configs/default.yml", "plan: [full]\n")
     return sub
 
 
-def go(sub, capsys, walks: str, *args: str, extra_runner: str = ""):
+def go(sub, capsys, walks: str, *args: str, extra_runner: str = "", transitions: str | None = None):
+    """`transitions`: what the runner config declares for `late` — by default what GROW claims;
+    a walk that claims something else declares that (or "[]": nothing)."""
     sub.write("walks/main.yml", walks)
-    if extra_runner:
-        sub.write("testrunner.yml", RUNNER + extra_runner)
+    if (walks is not GROW and transitions is None and "produces" not in walks) or transitions == "[]":
+        transitions = "[]"
+    if extra_runner or transitions is not None:
+        sub.write("testrunner.yml", RUNNER.replace("@T@", GROW_T if transitions is None else transitions)
+                  + extra_runner)
     code = main(["--root", str(sub.root), "--color", "never", "--non-interactive", *args])
     out = capsys.readouterr()
     j = sub.root / "state" / "journal.jsonl"
@@ -215,7 +230,8 @@ actions:
       - {id: create, run: "exit 1", produces: {late: created}, on: {failed: ignore}}
       - {id: install, run: "echo install >> trail", requires: {late: created}}
 """
-    code, out, ev, trail = go(s, capsys, walks, "w")
+    code, out, ev, trail = go(s, capsys, walks, "w",
+                              transitions='\n      - {from: "*", to: created, by: w/create, on: passed}')
     assert code != 0
     assert "w/install: requires {'late': 'created'}" in out
     assert trail == [] and not [e for e in ev if e["event"] == "step_start"]
@@ -245,13 +261,14 @@ actions:
       - {id: form, run: "echo form >> trail"}
 """
     s.write("member", "")
-    code, out, ev, trail = go(s, capsys, walks, "w")
+    t = '\n      - {from: "*", to: joined, by: w, on: skipped}'
+    code, out, ev, trail = go(s, capsys, walks, "w", transitions=t)
     assert code == 0, out
     assert trail == []
     assert ends(ev)[-1] == ("w", "skipped") and ev[-1]["state"] == {"late": "joined"}
     (s.root / "member").unlink()
     (s.root / "state" / "state.json").unlink()
-    code, out, ev, trail = go(s, capsys, walks, "w")
+    code, out, ev, trail = go(s, capsys, walks, "w", transitions=t)
     assert trail == ["form"] and ends(ev)[-1] == ("w", "passed")
 
 
@@ -375,7 +392,7 @@ def test_the_walks_requires_is_derived_and_its_composed_effect_satisfies_the_nex
 def test_negative_control_a_walk_that_does_not_reach_the_state_fails_the_static_check(s, capsys):
     s.write("configs/default.yml", "plan: [grow, use-joined]\n")
     walks = GROW.replace(', produces: {late: {installed: joined}}', '')
-    code, out, ev, trail = go(s, capsys, walks, "--plan")
+    code, out, ev, trail = go(s, capsys, walks, "--plan", transitions=GROW_T.rsplit("\n", 1)[0])
     assert code != 0 and "use-joined: requires {'late': 'joined'}" in out
 
 
@@ -404,7 +421,9 @@ def test_one_name_one_action(s, capsys):
 def test_list_shows_walks_but_never_inner_steps(s, capsys):
     code, out, _, _ = go(s, capsys, GROW, "--list")
     assert code == 0, out
-    assert "grow" in out and "grow/create" not in out
+    actions = out.split("\nstates:")[0]               # the actions section; states names inner steps as `by`
+    assert "grow" in actions and "grow/create" not in actions
+    assert "absent -> created  by grow/create on passed" in out   # the declared transition is shown
 
 
 # ── the template grammar ─────────────────────────────────────────────────────
@@ -468,7 +487,7 @@ def ext(s, tmp_path, monkeypatch):
         p.chmod(p.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", f"{d}:{os.environ['PATH']}")
     s.write("mod.py", EXT_MOD)
-    s.write("testrunner.yml", RUNNER + "ext: {ansible: {}, vagrant: {}}\n")
+    s.write("testrunner.yml", RUNNER.replace("@T@", "[]") + "ext: {ansible: {}, vagrant: {}}\n")
     s.calls = rec
     return s
 

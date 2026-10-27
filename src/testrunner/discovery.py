@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .api import (BUILTIN_OUTCOMES, MARK, ActionMark, FixtureMark, HookMark, ObserverMark, ResolverMark,
-                  StepKindMark)
+                  StepKindMark, ValidatorKindMark, ValidatorMark)
 from .config import ConfigError, RunnerConfig
 
 
@@ -74,6 +74,8 @@ class Registry:
     resolvers: dict[str, tuple[Callable, str]] = field(default_factory=dict)
     readonly_kinds: set[str] = field(default_factory=set)       # kinds whose steps only look
     describers: dict[str, Callable] = field(default_factory=dict)  # kind -> --dry-run describer
+    validators: dict[str, tuple[Callable, str]] = field(default_factory=dict)       # @validator: name -> (fn, source)
+    validator_kinds: dict[str, tuple[Callable, tuple[str, ...], str]] = field(default_factory=dict)
 
 
 def _module_files(entry: Path) -> list[Path]:
@@ -184,6 +186,15 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
             reg.readonly_kinds.add(mark.name)
         if mark.describe is not None:
             reg.describers[mark.name] = mark.describe
+    elif isinstance(mark, ValidatorMark):
+        if mark.name in reg.validators:
+            raise ConfigError(f"validator {mark.name!r} exported twice: {reg.validators[mark.name][1]} and {where}")
+        reg.validators[mark.name] = (obj, where)
+    elif isinstance(mark, ValidatorKindMark):
+        if mark.name in reg.validator_kinds:
+            raise ConfigError(f"validator kind {mark.name!r} exported twice: {reg.validator_kinds[mark.name][2]} "
+                              f"and {where}")
+        reg.validator_kinds[mark.name] = (obj, mark.keys, where)
     elif isinstance(mark, ResolverMark):
         if mark.name in reg.resolvers:
             raise ConfigError(f"resolver {mark.name!r} exported twice: {reg.resolvers[mark.name][1]} and {where}")
@@ -198,7 +209,8 @@ def _register(reg: Registry, obj: Callable, mark: Any, where: str) -> None:
 def _collect_extensions(reg: Registry, rc: RunnerConfig) -> None:
     """The inner-step kinds and resolvers of every extension the runner config enables
     (`ext: {<name>: {...}}`): marks in `testrunner.ext.<name>` and `testrunner.ext.<name>.kinds`.
-    Only those two marks are taken from an extension: its fixtures stay the subscriber's call."""
+    Only those marks (and validator kinds) are taken from an extension: its fixtures stay the
+    subscriber's call."""
     for name in rc.ext:
         for modname in (f"testrunner.ext.{name}", f"testrunner.ext.{name}.kinds"):
             try:
@@ -210,7 +222,7 @@ def _collect_extensions(reg: Registry, rc: RunnerConfig) -> None:
                 raise
             for obj in list(vars(module).values()):
                 mark = getattr(obj, MARK, None)
-                if isinstance(mark, (StepKindMark, ResolverMark)):
+                if isinstance(mark, (StepKindMark, ResolverMark, ValidatorKindMark)):
                     _register(reg, obj, mark, f"{modname}:{getattr(obj, '__name__', '?')}")
     if reg.step_kinds or reg.resolvers:
         log.info("walk kinds %s, resolvers %s", sorted(reg.step_kinds), sorted(reg.resolvers))
@@ -268,3 +280,12 @@ def validate_registry(reg: Registry, rc: RunnerConfig) -> None:
     for var in reg.observers:
         if var not in rc.states:
             raise ConfigError(f"observer for unknown state variable {var!r}")
+    from .statemachine import check_agreement, check_declarations
+    from .validate import check_validators
+    check_agreement(reg, rc.states)
+    check_declarations(reg, rc.states)
+    check_validators(reg, rc.states)
+    from .statemachine import DerivedObserver
+    for var, sv in rc.states.items():
+        if sv.order is not None:
+            reg.observers[var] = DerivedObserver(sv)

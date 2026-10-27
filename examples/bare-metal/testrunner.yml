@@ -8,8 +8,16 @@ params_section: params
 configs: {dir: configs, env: METAL_CONFIG, link: metal.yml}
 
 states:
-  power: {values: ["off", "on"]}                  # no `initial`: only the BMC knows
-  os:    {values: [absent, installed]}            # no `initial`: only the machine knows
+  power:                                          # no `initial`: only the BMC knows
+    values: ["off", "on"]
+    validate: {outcome: true}                     # the @observer has the last word
+    transitions:
+      - {from: "*", to: "on", by: power-on, on: passed}
+  os:                                             # no `initial`: only the machine knows
+    values: [absent, installed]
+    validate: {outcome: true}
+    transitions:
+      - {from: "*", to: installed, by: reinstall, on: passed}
 
 paths:
   lifecycle: [survey, power-on, reinstall, verify]

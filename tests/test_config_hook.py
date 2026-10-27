@@ -6,7 +6,17 @@ import json
 
 import pytest
 
-RUNNER = "modules: [m.py]\nstates: {s: {values: [a, b], initial: a}}\n"
+RUNNER = """modules: [m.py]
+states:
+  s:
+    values: [a, b]
+    initial: a
+    validate: {outcome: true}
+    model_only: true
+    transitions:
+      - {from: "*", to: b, by: only-y, on: passed}
+      - {from: "*", to: b, by: always, on: passed}
+"""
 CONFIG = """
     mode: x
     secret: !NOLOG hunter2
