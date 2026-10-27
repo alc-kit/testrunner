@@ -32,15 +32,25 @@ care. The engine already has a mechanism for each of these.
 **`testrunner.yml`**: the state model.
 ```yaml
 states:
-  power: {values: ["off", "on"]}         # no `initial`: only the BMC knows
-  os:    {values: [absent, installed]}   # no `initial`: only the machine knows
+  power:                                 # no `initial`: only the BMC knows
+    values: ["off", "on"]
+    validate: {outcome: true}            # the @observer has the last word
+    transitions:
+      - {from: "*", to: "on", by: power-on, on: passed}
+  os:                                    # no `initial`: only the machine knows
+    values: [absent, installed]
+    validate: {outcome: true}
+    transitions:
+      - {from: "*", to: installed, by: reinstall, on: passed}
 paths:
   lifecycle: [survey, power-on, reinstall, verify]
 scenario:
   release_when: {power: "off"}           # one checkout drives one machine
 ```
 Neither variable has an `initial` value. The runner reads both from the machine before it
-judges the plan, and the static check then starts from what is really there.
+judges the plan, and the static check then starts from what is really there. The transitions
+are the same changes the actions claim (`power-on` produces `power: on`, `reinstall` produces
+`os: installed`); a plan where the two disagree is refused.
 
 **`actions/metal.py`**: one observer per state, and four actions.
 - `power` asks the BMC (`ipmitool ... chassis power status`).

@@ -8,7 +8,14 @@ import json
 
 SUB = """
 modules: [m.py]
-states: {sys: {values: [absent, up], initial: absent}}
+states:
+  sys:
+    values: [absent, up]
+    initial: absent
+    validate: {outcome: true}
+    transitions:
+      - {from: absent, to: up, by: build-then-fail, on: passed}
+      - {from: absent, to: up, by: fail-cleanly, on: passed}
 scenario: {release_when: {sys: absent}}
 """
 MOD = """

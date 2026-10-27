@@ -6,9 +6,31 @@ state_dir: state                 # the SUBSCRIBER's state — testrunner keeps n
 params_section: params
 configs: {dir: configs, env: TOY_CONFIG, link: toy.yml}
 
+# The state machine, all of it: each variable's values, how a claimed value is confirmed
+# (`validate:`), and every change an action may make (`transitions:`). The actions declare the
+# same changes in their `produces`; if the two disagree, the plan is refused.
 states:
-  service: {values: [absent, installed, running], initial: absent}
-  data:    {values: [empty, seeded], initial: empty}
+  service:
+    initial: absent
+    validate: {outcome: true}     # a claim holds when the step that made it passed
+    values:
+      absent:    {criterion: "the sandbox holds no service file"}
+      installed: {criterion: "the service file says installed"}
+      running:   {criterion: "the service file says running"}
+    transitions:
+      - {from: "*", to: installed, by: install,   on: passed}
+      - {from: "*", to: running,   by: start,     on: passed}
+      - {from: "*", to: absent,    by: uninstall, on: passed}
+    # read by the @observer in actions/service.py
+  data:
+    initial: empty
+    validate: {outcome: true}
+    values: [empty, seeded]
+    transitions:
+      - {from: "*", to: seeded, by: seed,      on: passed}
+      - {from: "*", to: seeded, by: repair,    on: passed}
+      - {from: "*", to: empty,  by: uninstall, on: passed}
+    model_only: true              # nothing reads it back: its value is what the steps claimed
 
 paths:
   lifecycle: [install, start, seed, verify]

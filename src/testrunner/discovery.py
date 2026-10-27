@@ -268,3 +268,6 @@ def validate_registry(reg: Registry, rc: RunnerConfig) -> None:
     for var in reg.observers:
         if var not in rc.states:
             raise ConfigError(f"observer for unknown state variable {var!r}")
+    from .statemachine import check_agreement, check_declarations
+    check_agreement(reg, rc.states)
+    check_declarations(reg, rc.states)

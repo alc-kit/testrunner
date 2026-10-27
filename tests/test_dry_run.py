@@ -16,7 +16,13 @@ RUNNER = """
 modules: [mod.py]
 action_files: [walks/*.yml]
 states:
-  rig: {values: [absent, up, done], initial: absent}
+  rig:
+    values: [absent, up, done]
+    initial: absent
+    validate: {outcome: true}
+    transitions:          # read by the @observer
+      - {from: "*", to: up, by: make-up, on: passed}
+      - {from: up, to: done, by: grow, on: passed}
 ext: {ansible: {}, vagrant: {}}
 paths:
   full: [make-up, grow, described]

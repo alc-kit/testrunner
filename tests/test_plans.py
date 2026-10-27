@@ -9,7 +9,15 @@ from testrunner.planner import Compiler, Walker, initial_state, simulate
 RUNNER = """
 modules: [mod.py]
 states:
-  s: {values: [a, b, c], initial: a}
+  s:
+    values: [a, b, c]
+    initial: a
+    validate: {outcome: true}
+    model_only: true
+    transitions:
+      - {from: "*", to: b, by: one,   on: passed}
+      - {from: "*", to: c, by: two,   on: passed}
+      - {from: "*", to: a, by: reset, on: passed}
 paths:
   main: [one, two, three]
   outer: [main, four]
@@ -194,7 +202,14 @@ def test_range_without_default_path_refused(sub):
 TRANSITIONS = """
 modules: [mod.py]
 states:
-  rig: {values: [absent, up, installed], initial: absent}
+  rig:
+    values: [absent, up, installed]
+    initial: absent
+    validate: {outcome: true}
+    model_only: true
+    transitions:
+      - {from: absent, to: up, by: bring-up, on: passed}
+      - {from: up, to: installed, by: install, on: passed}
 paths:
   main: [bring-up, install, bring-up]
 """
@@ -220,7 +235,7 @@ def test_transition_map_does_not_move_state_backwards(sub):
 
 def test_plain_produces_would_move_it_backwards(sub):
     # negative control: the same plan with an unconditional produces breaks needs-installed
-    sub.write("testrunner.yml", TRANSITIONS)
+    sub.write("testrunner.yml", TRANSITIONS.replace("{from: absent, to: up,", '{from: "*", to: up,'))
     sub.write("mod.py", TMOD.replace('produces={"rig": {"absent": "up"}}', 'produces={"rig": "up"}'))
     rc = load_runner_config(sub.root / "testrunner.yml")
     reg = collect(rc)

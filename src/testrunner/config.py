@@ -112,7 +112,7 @@ class RunnerConfig:
     # files holding more `actions:` (walk actions): globs, relative to the root
     action_files: list[str] = field(default_factory=list)
     state_dir: Path = Path("state")
-    states: dict[str, dict] = field(default_factory=dict)
+    states: dict[str, Any] = field(default_factory=dict)      # name -> statemachine.StateVar
     paths: dict[str, list] = field(default_factory=dict)
     default_path: str | None = None
     # what the CLI word `all` runs when the run config's plan is empty (`all: {fallback: <path>}`)
@@ -164,15 +164,8 @@ def load_runner_config(path: Path) -> RunnerConfig:
     if unknown:
         raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}")
     root = path.parent
-    states = {}
-    for var, spec in (data.get("states") or {}).items():
-        if isinstance(spec, list):
-            spec = {"values": spec}
-        if not isinstance(spec, dict) or not isinstance(spec.get("values"), list) or not spec["values"]:
-            raise ConfigError(f"{path}: states.{var} needs a non-empty `values` list")
-        if "initial" in spec and spec["initial"] not in spec["values"]:
-            raise ConfigError(f"{path}: states.{var}.initial {spec['initial']!r} is not one of its values")
-        states[var] = spec
+    from .statemachine import parse_states
+    states = parse_states(path, data.get("states"))
     paths = data.get("paths") or {}
     for name, steps in paths.items():
         if not isinstance(steps, list):

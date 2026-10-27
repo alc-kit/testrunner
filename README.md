@@ -34,11 +34,30 @@ Further reading:
 
 ## Concepts
 
-**States.** The subscriber declares variables that describe the system under test:
+**States.** The subscriber declares the whole state machine in the runner config: each
+variable's values, what each value means (`criterion`), how a claimed value is confirmed
+(`validate`), and every transition, meaning which action may change the variable, on which
+outcome, from which value to which:
 ```yaml
 states:
-  service: {values: [absent, installed, running], initial: absent}
+  service:
+    initial: absent
+    validate: {outcome: true}          # every value's validator, unless a value names its own
+    values:
+      absent:    {criterion: "no service file"}
+      installed: {criterion: "the service file says installed"}
+      running:   {criterion: "the service file says running"}
+    transitions:
+      - {from: absent, to: installed, by: install, on: passed}
+      - {from: "*",    to: running,   by: start,   on: passed}
 ```
+The actions declare the same changes in their `produces` (below). **The two must agree, line
+for line**: a claim the runner config does not declare, a declared transition no action
+claims, or the same change on a different outcome makes the plan **undecided**. It is refused
+before anything runs, with every mismatch listed. The list of transitions is complete: an
+action/outcome pair that is not in it changes nothing. Undefined behaviour is a failure, never
+a default. See [State machine](#state-machine) for the rest of the declaration (validators,
+observers, `model_only`).
 
 **Actions** are the exported functions, each with a contract:
 ```python
@@ -72,7 +91,9 @@ actions:
 
 `produces` can also be a **transition map**: `produces: {rig: {up: installed}}` moves
 `up` to `installed` and leaves any other value alone, so re-running an idempotent step
-on a system that is further along does not move it backwards.
+on a system that is further along does not move it backwards. The runner config declares it
+as `{from: up, to: installed, by: <action>, on: passed}`. A plain `produces: {rig: absent}`
+changes the variable from any value, and is declared `from: "*"`.
 
 **Fixtures** — built in: `run`, `config`, `store`, `ui`, `registry` (per run) and `step`,
 `params`, `proc`, `state` (per step). Your own:
@@ -130,8 +151,28 @@ on the config) and `max_visits:` (a bound for `goto` loops).
 A run is a walk over a state machine. Every part of it is declared, and `--plan --matrix`
 prints the whole of it as a table, which also goes in the journal and both reports.
 
-- **States**: the runner config's `states:` (e.g. `rig: [absent, up, installed, clustered]`).
-  Observers read the real value, and it wins over the model.
+- **States**: the runner config's `states:`, each variable with:
+  - `values`: a list of names, or a mapping `{<value>: {criterion, validate}}`;
+  - `initial`: the value before anything ran (leave it out when only an observer knows);
+  - `criterion`: what a value MEANS, in a sentence. It is shown by `--list`, and later in the
+    plan and reports;
+  - `validate`: how a claimed value is confirmed: once for the variable, or per value. Every
+    value a transition touches must have one, or the plan is refused;
+  - `transitions`: every change, as `{from, to, by, on}`, all four stated. `from: "*"` means
+    from any value. An inner step of a walk action is `by: <walk>/<step id>`;
+  - how it is read back. Exactly one of these applies to a variable a transition changes:
+    - an `@observer`;
+    - `observe: {order: [...]}`, an observer derived from the validators;
+    - `model_only: true`: nothing re-reads it, and its value is what the steps claimed.
+
+    A variable that no transition changes is a constant (its `initial`).
+
+  Observers read the real value at run start, and it wins over the stored model.
+- **Agreement**: the transitions declared in the runner config and the actions' `produces` /
+  `produces_on` must match, line for line, outcomes included. If they don't, the plan is
+  UNDECIDED and refused before anything runs (`--list`, `--plan` and every run). An inner step
+  that calls an action without effects of its own carries that action's claims, which are
+  checked once, as that action's.
 - **Events**: a step's outcome: `passed`, `failed`, `errored`, `aborted`, `skipped`, or a named
   one the action declares (`outcomes=["degraded"]`).
 - **Guards**: an action's `requires` (the states it may start from). Checked before it runs, and
@@ -672,7 +713,7 @@ pythonpath: [lib/]             # directories those modules import from
 actions: {...}                 # shell exports, and walk actions (an entry with steps:)
 action_files: [actions/*.yml]  # more walk actions, one `actions:` mapping per file
 state_dir: state               # the subscriber's state (journal, state, scenario, logs)
-states: {...}
+states: {...}                  # the state machine: values, criteria, validators, transitions
 paths: {lifecycle: [install, start, seed, verify]}
 default_path: lifecycle        # what ranges slice (implied when there is one path)
 all: {fallback: lifecycle}     # what `all` runs when the plan is empty (no path may be named `all`)

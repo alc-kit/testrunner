@@ -62,6 +62,13 @@ def test_with_override_reaches_the_action(toy, capsys):
     assert code == 0 and (toy.root / "state" / "sandbox" / "data").read_text() == "xxxxx"
 
 
+def declare_fake_start(toy):
+    """The toy's runner config, with the liar's claim declared beside start's."""
+    f = toy.root / "testrunner.yml"
+    line = '      - {from: "*", to: running,   by: start,     on: passed}\n'
+    f.write_text(f.read_text().replace(line, line + line.replace("by: start,    ", "by: fake-start,")))
+
+
 def test_observer_overrides_the_model(toy, capsys):
     # the model says `start` produces running; reality (the observer) says otherwise
     toy.write("actions/liar.py", """
@@ -70,6 +77,7 @@ def test_observer_overrides_the_model(toy, capsys):
         def fake_start():
             pass
         """)
+    declare_fake_start(toy)
     code, out = toy.run("uninstall", "install", "fake-start", capsys=capsys)
     assert code == 0 and "observed service='installed'" in out
     assert json.loads((toy.root / "state" / "state.json").read_text())["service"] == "installed"
@@ -82,6 +90,7 @@ def test_expect_state_checked_against_reality(toy, capsys):
         def fake_start():
             pass
         """)
+    declare_fake_start(toy)
     toy.write("configs/liar.yml", """
         params: {sandbox: state/sandbox}
         plan:
@@ -208,6 +217,9 @@ def test_toml_runner_and_run_config(sub, capsys):
         [states.s]
         values = ["a", "b"]
         initial = "a"
+        validate = {outcome = true}
+        model_only = true
+        transitions = [{from = "*", to = "b", by = "go", on = "passed"}]
         """)
     sub.write("mod.py", "from testrunner import action\n@action(produces={'s': 'b'})\ndef go(params):\n    assert params['n'] == 2\n")
     sub.write("configs/default.toml", """

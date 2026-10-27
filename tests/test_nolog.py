@@ -109,6 +109,10 @@ def test_toml_marking(tmp_path):
 def test_scenario_keeps_the_marking_for_later_runners(sub, capsys):
     make(sub, f"{{NOLOG: {SECRET}}}")
     sub.write("m.py", MOD + "\n@action(produces={'s': 'a'})\ndef change(): pass\n")
+    sub.write("testrunner.yml", RUNNER.replace(
+        "states: {s: {values: [a], initial: a}}",
+        'states: {s: {values: [a], initial: a, validate: {const: true}, model_only: true,\n'
+        '             transitions: [{from: "*", to: a, by: change, on: passed}]}}'))
     assert sub.run("change", capsys=capsys)[0] == 0           # selects the scenario
     rec = json.loads((sub.root / "state/scenario.json").read_text())
     assert rec["nolog_paths"] == ["params.token"]

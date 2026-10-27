@@ -15,7 +15,15 @@ from testrunner.planner import Compiler
 RUNNER = """
 modules: [mod.py]
 states:
-  rig: {values: [absent, up, installed, clustered], initial: absent}
+  rig:
+    values: [absent, up, installed, clustered]
+    initial: absent
+    validate: {outcome: true}
+    transitions:
+      - {from: "*", to: up,        by: up,      on: passed}
+      - {from: "*", to: installed, by: install, on: passed}
+      - {from: "*", to: clustered, by: form,    on: passed}
+      - {from: "*", to: clustered, by: join,    on: passed}
 paths:
   full: [up, install, {action: form, max_visits: 2}, {action: join, max_visits: 2}, verify]
 default_path: full

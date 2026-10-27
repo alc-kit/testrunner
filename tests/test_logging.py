@@ -12,7 +12,13 @@ from testrunner.proc import Proc
 
 RUNNER = """
 modules: [m.py]
-states: {s: {values: [a, b], initial: a}}
+states:
+  s:
+    values: [a, b]
+    initial: a
+    validate: {outcome: true}
+    model_only: true
+    transitions: [{from: "*", to: b, by: flip, on: passed}]
 actions:
   sh-ok:
     run: 'echo shell-said-hello'
