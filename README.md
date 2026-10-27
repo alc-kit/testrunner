@@ -25,6 +25,17 @@ testrunner/bin/testrunner --list
 Update with `git subtree pull --prefix=testrunner … <tag> --squash`. Change testrunner
 in this repository, not in a subscriber's copy.
 
+A project usually starts it from a small wrapper, and says what the wrapper is called, so
+the help (`./run.sh --help`) and every "run this next" hint name the command its operators
+type, not `testrunner`. `$0` is exactly what they typed:
+```sh
+#!/usr/bin/env bash
+export TESTRUNNER_PROG="$0"
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$HERE/testrunner/bin/testrunner" --root "$HERE" "$@"
+```
+
 Further reading:
 - `docs/extending.md`: building a test framework on testrunner. Where each kind of code goes,
   designing the state model, and writing an extension.
@@ -668,6 +679,9 @@ testrunner --list | --status | --scenario | --select -c NAME | --release | --rep
 testrunner [steps] -- ARGS...    everything after the first `--` is for the steps' tool
 ```
 Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).
+
+`TESTRUNNER_PROG` names the command in the help and in the hints testrunner prints (a
+project's wrapper sets it, above). Unset, it is `testrunner`.
 
 ### Arguments for the steps: `--`
 

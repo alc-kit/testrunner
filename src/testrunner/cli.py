@@ -16,6 +16,7 @@
                                   each step's own, it never replaces it)
   --config NAME|FILE   --with key=value   --color auto|always|never   --root DIR
   -v | -vv | --log-level LEVEL   show testrunner's own log (decisions) on stderr
+  TESTRUNNER_PROG="$0"       a wrapper names itself (export it in run.sh): this help and every hint use it
   --show-commands      print every command before it runs, as a line you can paste into a
                        shell (also: TESTRUNNER_SHOW_COMMANDS=1)
 
@@ -32,13 +33,14 @@ import asyncio
 import logging
 import os
 import platform
+import re
 import shlex
 import sys
 from pathlib import Path
 
 from . import __version__
-from .config import (ConfigError, deep_merge, find_runner_config, load_run_config,
-                     load_runner_config, parse_with)
+from .config import (PROG_ENV, ConfigError, deep_merge, find_runner_config, load_run_config,
+                     load_runner_config, parse_with, program_name)
 from .discovery import collect
 from .fixtures import FixtureError
 from .log import ENV_LEVEL, Logs, level_of
@@ -57,9 +59,19 @@ log = logging.getLogger(__name__)
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="testrunner", description=__doc__.split("\n\n")[0],
-                                formatter_class=argparse.RawDescriptionHelpFormatter,
-                                epilog=__doc__.split("\n\n", 1)[1])
+    prog = program_name()
+    description, epilog = __doc__.split("\n\n", 1)
+    if prog != "testrunner":
+        # the examples name the command the operator types; the explanations keep their column
+        def example(m: re.Match) -> str:
+            line = f"  {prog}{m.group(1)}"
+            column = len(m.group(0)) - len(m.group(3))
+            return line + " " * max(column - len(line), 2) + m.group(3) if m.group(3) else line
+        epilog = re.sub(r"^  testrunner((?: \S+)*?)( {2,}(\S.*))?$",
+                        lambda m: example(m) if m.group(2) else f"  {prog}{m.group(1)}", epilog, flags=re.M)
+        description += f"\n\n{prog} runs testrunner ({PROG_ENV}={prog})."
+    p = argparse.ArgumentParser(prog=prog, description=description,
+                                formatter_class=argparse.RawDescriptionHelpFormatter, epilog=epilog)
     p.add_argument("steps", nargs="*", help="actions, paths or ranges (a..b); none or `all` = the plan")
     p.add_argument("--config", "-c", help="run config name (configs/<name>) or file")
     p.add_argument("--with", "-w", dest="with_", action="append", default=[], metavar="KEY=VALUE",
