@@ -559,7 +559,8 @@ cancelled:
 - `release_when` is not judged: the stopped run left the system wherever it was, so the
   scenario stays until a run reaches the state, or `--release`.
 
-The operator's own `abort` (typed while the run waits) ends the step `aborted` the same way.
+The operator's own `abort` (typed while the run waits) ends the step `aborted` too, and the
+run fails.
 
 ## Processes, prompts and colour
 
