@@ -551,6 +551,16 @@ scenario:
 State-changing runs take an exclusive writer lock. Runs of read-only actions do not
 take it, so they can run beside a state-changing run.
 
+**An interrupted run is never a pass.** On Ctrl-C (SIGINT), or when the run's task is
+cancelled:
+- every step still open, a walk and its inner step alike, ends `aborted` in the journal,
+  innermost first;
+- the run ends failed, "interrupted during <step>", and exits 130;
+- `release_when` is not judged: the stopped run left the system wherever it was, so the
+  scenario stays until a run reaches the state, or `--release`.
+
+The operator's own `abort` (typed while the run waits) ends the step `aborted` the same way.
+
 ## Processes, prompts and colour
 
 `proc.run()` runs a command on a pseudo-terminal, so it behaves as it would for a person.
@@ -678,7 +688,8 @@ testrunner --list | --status | --scenario | --select -c NAME | --release | --rep
   --show-commands                  every command before it runs, as a copy-pasteable shell line
 testrunner [steps] -- ARGS...    everything after the first `--` is for the steps' tool
 ```
-Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock).
+Exit codes: 0 passed, 1 failed, 2 refused (config, plan or lock), 130 interrupted (Ctrl-C:
+journalled as failed, see "The scenario lock").
 
 `TESTRUNNER_PROG` names the command in the help and in the hints testrunner prints (a
 project's wrapper sets it, above). Unset, it is `testrunner`.

@@ -212,6 +212,9 @@ class Runner:
         self._current_task: asyncio.Task | None = None
         self._aborted = False
         self._frames: list[WalkFrame] = []      # the walk actions being walked, innermost last
+        # steps journalled as started and not yet ended (a walk's step and its inner step):
+        # an interrupt ends each of them, innermost first, instead of leaving them open
+        self._open: list[tuple[str, str, float, str]] = []      # (step, action, started, attempt)
         self._run_ctx: RunContext | None = None
         self._run_scope: Scope | None = None
         # one Secrets for the whole run: config-marked values now, run.nolog() ones later
@@ -318,6 +321,7 @@ class Runner:
                  [s.id for s in program.main])
         run.state = state
         result = RunResult(True, run.results)
+        interrupted = False
         self.journal("run_start", config=str(self.run_config.file or ""), source=program.source,
                      matrix=matrix(program, self.reg), machine=describe(rc.states, self.reg),
                                   steps=[s.id for s in program.main], state=state, pid=os.getpid(),
@@ -337,6 +341,25 @@ class Runner:
                 return result
             end = await self._walk(run, run_scope, program, data)
             result.passed, result.why = end.passed, end.why
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # interrupted (Ctrl-C, SIGINT, the task cancelled): never a pass. Every step still
+            # open ends ABORTED in the journal, innermost first, and the run ends failed with
+            # the step it was in; the state the steps left is unknown to the model
+            interrupted = True
+            where = self._open[-1][0] if self._open else "(between steps)"
+            result.passed, result.why = False, f"interrupted during {where}"
+            log.error("run %s interrupted during %s; open steps %s", self.run_id, where,
+                      [o[0] for o in self._open] or "none")
+            while self._open:
+                sid, action, started, attempt = self._open.pop()
+                self.journal("step_end", step=sid, action=action, outcome=ABORTED,
+                             detail="interrupted (the run was stopped)", seconds=round(time.monotonic() - started, 1),
+                             state=run.state, metrics={}, **({"attempt": attempt} if attempt else {}))
+                run.results.append(StepResult(sid, action, ABORTED, "interrupted (the run was stopped)",
+                                              seconds=time.monotonic() - started, state=dict(run.state)))
+            self.say(self.style.bad(f"interrupted during {where}: the run ends failed; "
+                                    f"the scenario is not released"))
+            raise
         finally:
             problems = await run.finish()
             log.debug("closing the run scope (run fixtures tear down in reverse order)")
@@ -349,7 +372,10 @@ class Runner:
             log.info("run %s ends %s%s; state %s", self.run_id, "PASSED" if result.passed else "FAILED",
                      f" ({result.why})" if result.why else "", run.state)
             rw = rc.release_when
-            if not self.readonly and not self.dry and rw and self.store.get_scenario() is not None:
+            if interrupted and rw:
+                # a stopped run left the system wherever it was: never release on that
+                log.info("scenario.release_when not judged: the run was interrupted -> scenario stays")
+            elif not self.readonly and not self.dry and rw and self.store.get_scenario() is not None:
                 # judged on what IS, never on the model alone: re-read every observed
                 # variable release_when names; one that cannot be read keeps the scenario
                 blind = await self._reobserve(run, run_scope, "(release)", only=set(rw))
@@ -848,6 +874,7 @@ class Runner:
                                          + (" (dry)" if self.dry else "") + " ===="))
         self.journal("step_start", step=sid, action=act.name, params=params,
                      **({"attempt": attempt} if attempt else {}), **({"always": True} if always else {}))
+        self._open.append((sid, act.name, started, attempt))
         run.last_output = ""
         if not self.dry:                  # hooks of a step are about RUNNING it
             await self.hook("step_start", run=run, step=ctx)
@@ -962,6 +989,8 @@ class Runner:
         self.journal("step_end", step=sid, action=act.name, outcome=outcome.name,
                      detail=outcome.detail, seconds=round(sr.seconds, 1), state=run.state,
                      metrics=ctx.metrics, **({"attempt": attempt} if attempt else {}))
+        if self._open and self._open[-1][0] == sid:
+            self._open.pop()
         as_expected = outcome.name == expect.outcome
         mark = "" if as_expected else f"  (expected {expect.outcome})"
         line = (f"---- {sid}{f' attempt {attempt}' if attempt else ''}: {outcome.name}{mark} ({sr.seconds:.1f}s)"
