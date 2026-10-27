@@ -17,7 +17,9 @@ is a full extension, ported out of two production test harnesses.
 
 testrunner keeps no state of its own: the journal, the state and the scenario lock live in the
 subscriber's `state_dir`. A subscriber pulls testrunner in as a git subtree and starts it with
-`testrunner/bin/testrunner --root <its directory>`, usually from a two-line `run.sh`.
+`testrunner/bin/testrunner --root <its directory>`, usually from a short `run.sh` that also sets
+`TESTRUNNER_PROG=./run.sh`, so the help and the hints name the command its operators type (README,
+"Use it in a project").
 
 ## Where does my code go?
 

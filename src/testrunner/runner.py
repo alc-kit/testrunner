@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable, TextIO
 
 from .api import (ABORTED, BUILTIN_OUTCOMES, CANNOT_TELL, ERRORED, FAILED, PASSED, SKIPPED, Outcome,
                   OutcomeError)
-from .config import RunConfig, RunnerConfig, deep_merge, lookup
+from .config import RunConfig, RunnerConfig, deep_merge, lookup, program_name
 from .discovery import ActionSpec, Registry
 from .fixtures import FixtureError, Fixtures, Scope, accepted, call
 from .planner import Program, Step, Walker, matrix, produced, requires_holds, when_explained, when_holds
@@ -661,7 +661,8 @@ class Runner:
             + (f" ({', '.join(blocked)})" if blocked else "") + ", and the scenario is not released.",
             f"  look at: the step's log{'s' if logs else ''} under {self.store.path('logs')}"
             + (f" ({', '.join(logs)})" if logs else "") + ", and the trace.",
-            "  next: inspect the system; `testrunner --plan` reads it again through the observers; or tear it down.",
+            f"  next: inspect the system; `{program_name()} --plan` reads it again through the observers; "
+            "or tear it down.",
         ])
 
     async def _reobserve_after(self, run: RunContext, scope: Scope, ctx: StepContext, act: ActionSpec,
@@ -701,7 +702,7 @@ class Runner:
                 why = (f"{sid} ({act.name}): the observer reads {var}={seen!r}, but this step's validator "
                        f"confirmed {var}={was!r} — two looks disagree, so {var} is now UNKNOWN (no step that "
                        f"requires it will run, and the scenario is not released). Look at the step's validator "
-                       f"log and the trace; `testrunner --plan` reads it again.")
+                       f"log and the trace; `{program_name()} --plan` reads it again.")
                 self.journal("state_unknown", step=sid, var=var, was=was, observed=seen, outcome=outcome.name,
                              why=why)
             else:

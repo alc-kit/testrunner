@@ -102,6 +102,15 @@ def set_dotted(data: dict, dotted: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+PROG_ENV = "TESTRUNNER_PROG"
+
+
+def program_name() -> str:
+    """The command the operator typed: a project's wrapper (`./run.sh`) says what it is called
+    in TESTRUNNER_PROG, so the help and every "run this next" hint name the command they use."""
+    return os.environ.get(PROG_ENV) or "testrunner"
+
+
 @dataclass
 class RunnerConfig:
     root: Path
