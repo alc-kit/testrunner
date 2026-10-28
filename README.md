@@ -199,6 +199,30 @@ prints the whole of it as a table, which also goes in the journal and both repor
     value a transition touches must have one, or the plan is refused;
   - `transitions`: every change, as `{from, to, by, on}`, all four stated. `from: "*"` means
     from any value. An inner step of a walk action is `by: <walk>/<step id>`;
+  - **or** `machine`: the same machine as Mermaid `stateDiagram-v2` lines with UML labels, which
+    render on GitHub unchanged when pasted into a ```` ```mermaid ```` fence. A variable uses one
+    form; the YAML `transitions` stay valid during the migration window.
+
+    ```yaml
+    machine: |
+      [*]       --> absent
+      absent    --> up        : up [passed]
+      up        --> installed : install [passed]
+      %% the cluster was already formed
+      installed --> founded   : form [skipped]
+    ```
+
+    The accepted subset is exactly this:
+    - `[*] --> <value>`, the initial value, at most once (it replaces `initial`);
+    - `<value> --> <value> : <action> [<outcome>]`;
+    - `%%` comments on their own line (Mermaid does not accept one after a statement);
+    - an optional first line, `stateDiagram-v2`.
+
+    Anything else is refused with its line and the reason. That includes: another arrow, a
+    composite state, a note, a label without `[outcome]`, `[*]` as a target, a self-loop (not
+    yet), and a UML `/ effect` (reserved for updates of declared data). There is no `*`: write a
+    line for every value. `--list` and the reports also show each variable as a **state × event
+    table** (`-> <to> [<outcome>]` per cell, `·` where the action claims nothing from that value);
   - how it is read back. Exactly one of these applies to a variable a transition changes:
     - an `@observer`;
     - `observe: {order: [...]}`, an observer derived from the validators;

@@ -56,7 +56,9 @@ The state model is the framework's spine. Everything else is judged against it.
    `produces: {rig: {up: installed}}`, when re-running a step on a system that is further along must
    not move it backwards.
 3. **Every claim is confirmed; nothing is assumed.** Declare every transition in `states:` (the
-   actions' `produces` must agree), and give every value a validator. A claim is committed only
+   actions' `produces` must agree), as `transitions:` records or as a `machine:` block (Mermaid
+   lines with UML labels, `absent --> up : up [passed]`; README, "State machine"), and give
+   every value a validator. A claim is committed only
    when its validator holds. A step whose action ended `failed`, `errored` or `aborted` is not
    judged: the value from before is kept, and the bench needs live examination. After a passed
    step that claims nothing, or whose claim did not hold, the
