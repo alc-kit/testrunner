@@ -210,7 +210,8 @@ class Runner:
         # looking again, but only while the state it started from is still the state the run
         # starts from
         self._pre_look: dict | None = None
-        # variables a failed step left at the value from before (not judged): the release look
+        # variables a failed step left at the value from before (its end result not found, or none
+        # declared): the release look
         # reads reality to decide the release, and never overwrites these
         self._kept: set[str] = set()
         self.dry_not_run: list[str] = []               # python actions a dry run did not run
@@ -434,7 +435,7 @@ class Runner:
             elif not self.readonly and not self.dry and rw and self.store.get_scenario() is not None:
                 # judged on what IS, never on the model alone: re-read every observed
                 # variable release_when names; one that cannot be read keeps the scenario
-                # after a failure the recorded values are kept (not judged); the release is still
+                # after a failure the kept values stay (end result not found, or none declared); the release is still
                 # decided on what IS (the 2026-10-11 incident), read into a copy
                 seen = dict(run.state) if self._kept else None
                 blind = await self._reobserve(run, run_scope, "(release)", only=set(rw), into=seen)
@@ -686,7 +687,7 @@ class Runner:
                     self.journal("state_kept", step=ctx.id, var=var, value=cur, outcome=outcome.name,
                                  why="no expected end result is declared for this failure; the value from before is kept")
                     continue
-                to = lines[0]
+                to, = lines                      # one end result per (value, action, outcome): enforced at load
                 look = Scope("look", {}, parent=scope)
                 looks.append(look)
                 v = await self._validate(sv, Claim(var, to, CLAIMED, ctx.id, outcome.name, True, inner,

@@ -3,7 +3,7 @@ rig: `up` built every VM, then failed on a missing host tool; the runner kept th
 model's `rig: absent` (a failed outcome produces nothing, and only the variables a step
 produced were re-observed), and release_when {rig: absent} then RELEASED the scenario
 over five running VMs. A scenario is only released on an observed state. (Since 2026-10-28 a
-failed step is not judged: the recorded value is the one from before, and the release look reads
+failed step with no declared end result keeps the value from before, and the release look reads
 reality into a copy to decide, without changing that value.)"""
 import json
 
@@ -69,7 +69,7 @@ def test_a_failed_step_that_built_the_system_never_releases_the_scenario(sub, ca
     make(sub)
     code, out = sub.run("build-then-fail", capsys=capsys)
     assert code == 1
-    assert stored(sub)["sys"] == "absent"                   # kept, not judged
+    assert stored(sub)["sys"] == "absent"                   # kept (no end result declared)
     assert scenario_kept(sub) and "scenario released" not in out
     # the release look read 'up' into a copy: what the run hands its run_end hooks is the kept value
     assert json.loads((sub.root / "state-at-run-end").read_text())["sys"] == "absent"

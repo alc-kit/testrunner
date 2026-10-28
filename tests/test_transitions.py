@@ -235,7 +235,7 @@ def test_plan_matrix_prints_the_matrix(subscriber, capsys):
     assert "join" in table and "rig: installed|clustered" in table
     assert "outcome passed rig=clustered -> continue; otherwise -> stop (failed)" in table
     failed = next(ln for ln in table.splitlines() if "| failed " in ln and "goto form" in ln)
-    assert "(kept: no end result declared)" in failed                 # a failure is not judged (user 2026-10-28)
+    assert "(kept: no end result declared)" in failed                 # no end result declared: kept (user 2026-10-28)
     assert "| outcome failed rig=installed -> goto form; outcome failed -> run membership, then go on" in failed
     assert "passed*" in table and "stop (aborted)" in table
     assert "on join otherwise: stop (failed)" in out

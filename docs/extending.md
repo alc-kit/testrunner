@@ -59,8 +59,10 @@ The state model is the framework's spine. Everything else is judged against it.
    actions' `produces` must agree), as `transitions:` records or as a `machine:` block (Mermaid
    lines with UML labels, `absent --> up : up [passed]`; README, "State machine"), and give
    every value a validator. A claim is committed only
-   when its validator holds. A step whose action ended `failed`, `errored` or `aborted` is not
-   judged: the value from before is kept, and the bench needs live examination. After a passed
+   when its validator holds. After a step whose action ended `failed`, `errored` or `aborted`,
+   the transition declared for that outcome is its expected end result (an error state is
+   fine: a plan may expect a failure and repair the rig). Found, the walk goes on by its rules;
+   not found, the test fails, and the value from before is kept. After a passed
    step that claims nothing, or whose claim did not hold, the
    value before and every reachable value are asked, and exactly one may hold; otherwise the
    variable is unknown and the step fails. The observers read again after every state-changing

@@ -96,6 +96,19 @@ def test_refused(text, why):
         machine(text)
 
 
+def test_one_end_result_per_value_action_and_outcome():
+    # two failure modes for one outcome: refused until classification exists (WP step B1c)
+    with pytest.raises(ConfigError, match=r"make \[failed\] from 'absent' has 2 end results \(broken, up\)"):
+        machine("absent --> up : make [failed]\nabsent --> broken : make [failed]\n",
+                values=["absent", "up", "broken"])
+    with pytest.raises(ConfigError, match=r"has 2 end results .*\(with the \* line\)"):
+        parse_states("t.yml", {"rig": {"values": ["absent", "up", "broken"], "validate": {"outcome": True},
+                                       "transitions": [{"from": "*", "to": "broken", "by": "make", "on": "failed"},
+                                                       {"from": "absent", "to": "up", "by": "make", "on": "failed"}]}})
+    # control: different outcomes, or different values, are separate questions
+    machine("absent --> up : make [passed]\nabsent --> broken : make [failed]\n", values=["absent", "up", "broken"])
+
+
 def test_machine_and_transitions_exclude_each_other():
     with pytest.raises(ConfigError, match="`machine` and `transitions` exclude each other"):
         machine("absent --> up : up [passed]\n", transitions=[])

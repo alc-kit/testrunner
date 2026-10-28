@@ -172,6 +172,7 @@ def _parse_var(path: Path, var: str, spec: Any) -> StateVar:
             raise ConfigError(f"{where}.observe.order must list every value exactly once (values: {values}); "
                               f"an observer that cannot say a value is undefined")
         order = [str(v) for v in order]
+    _one_end_result(where, transitions)
     model_only = spec.get("model_only", False)
     if not isinstance(model_only, bool):
         raise ConfigError(f"{where}.model_only: want true or false")
@@ -274,6 +275,23 @@ def parse_machine(where: str, var: str, values: list[str], text: Any) -> tuple[s
             raise ConfigError(f"{at}: declared twice ({tr.text()})")
         out.append(tr)
     return initial, out
+
+
+def _one_end_result(where: str, transitions: list[Transition]) -> None:
+    """One value, one action, one outcome: ONE declared end result. Two would leave the runner to
+    pick one (it used to take the first), which is undefined. Several failure modes for one
+    outcome, told apart by their validators and routed by the plan, arrive with WP step B1c."""
+    seen: dict[tuple[str, str, str], set[str]] = {}
+    for t in transitions:
+        seen.setdefault((t.frm, t.by, t.on), set()).add(t.to)
+    for (frm, by, on), tos in seen.items():
+        also = seen.get((ANY, by, on), set()) if frm != ANY else set()
+        targets = tos | also
+        if len(targets) > 1:
+            raise ConfigError(f"{where}: {by} [{on}] from {frm!r} has {len(targets)} end results "
+                              f"({', '.join(sorted(targets))}){' (with the * line)' if also else ''}: one value, one "
+                              f"action and one outcome may declare ONE. Several failure modes told apart by their "
+                              f"validators are not supported yet (WP step B1c).")
 
 
 def state_event_table(sv: "StateVar") -> tuple[list[str], dict[str, dict[str, list[str]]]]:

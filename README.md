@@ -265,13 +265,24 @@ prints the whole of it as a table, which also goes in the journal and both repor
     `(answer, why)`.
 - **Claims are confirmed.** After a step, for every variable its action declares a transition
   for, from the value the variable has now:
-  - **The action ended `failed`, `errored` or `aborted`: NOT JUDGED.** No validator is asked
-    what it left. Every variable it has a transition for keeps its value from before the step,
-    the last confirmed state, journalled as `state_kept`. No observer overwrites it after the
-    step. A failure needs live examination before anything progresses; the next run's start look
-    reads the bench as it really is. The scenario is still never released on what nobody looked
-    at: the release look reads reality (into a copy, so the kept value stays), and a kept value
-    that no observer can read keeps the scenario.
+  - **The action ended `failed`, `errored` or `aborted`.** The transition declared for that
+    outcome is the failure's **expected end result**. It may be an error state
+    (`installed --> form_failed : form [failed]`), so a plan can expect a failure and deviate to
+    repair the rig before going on. Its validator is asked:
+    - **found**: the variable moves there (`state_changed`, "the failure's declared end result").
+      The step stays `failed`, the plan's rules route it, and the observer reads after it as
+      after any step;
+    - **not found** (does not hold, or cannot tell): **the test fails here and the run stops,
+      whatever the rules say.** The variable keeps its value from before the step, the last
+      confirmed state (`state_kept`, with the verdicts). What the observers can attest is
+      journalled as `observed_after_failure` and never applied;
+    - **no transition declared for that outcome**: the value from before is kept, the observers'
+      reading is recorded the same way, and the rules route as before. If the rig no longer
+      matches the kept value, the next step's observer sees the difference and fails that step.
+
+    The scenario is never released on what nobody looked at: after a failure the release look
+    reads reality into a copy (a kept value stays), and a kept value that no observer can read
+    keeps the scenario.
   - **The outcome claims a change**: the target value's validator is asked. If it *holds*, the
     change is committed and journalled as `state_changed`, with the validator that confirmed it.
     Otherwise the step **fails**, and the variable is checked as below.
