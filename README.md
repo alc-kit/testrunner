@@ -219,9 +219,9 @@ prints the whole of it as a table, which also goes in the journal and both repor
     - an optional first line, `stateDiagram-v2`.
 
     Anything else is refused with its line and the reason. That includes: another arrow, a
-    composite state, a note, a label without `[outcome]`, `[*]` as a target, and a UML
-    `/ effect` (reserved for updates of declared data). There is no `*`: write a line for every
-    value.
+    composite state, a note, a label without `[outcome]`, `[*]` as a target, and any UML
+    `/ effect` other than an update of declared data (below). There is no `*`: write a line for
+    every value.
 
     **Every line written out.** For every value, every outcome of an action that has a
     transition from it needs its line: `passed`, `failed`, `errored`, `aborted`, `skipped`, and
@@ -240,6 +240,23 @@ prints the whole of it as a table, which also goes in the journal and both repor
     A variable that no transition changes is a constant (its `initial`).
 
   Observers read the real value at run start, and it wins over the stored model.
+- **Data** (extended state): `data: {expected: {initial: [n1, n2, n3]}}` declares a SET of names.
+  `initial` may also be a template, rendered at run start with the run's resolvers (e.g. an
+  extension's list of the scenario's nodes). It is changed **only** by a UML effect on a
+  `machine:` line:
+
+  ```
+  clustered --> clustered : addnode [passed] / expected += {param.node}
+  clustered --> clustered : rmnode [passed]  / expected -= {param.node}
+  ```
+
+  The effect applies only when that line's claim is **confirmed** by its validator; it is
+  journalled as `data_changed` (the value, what the set was, what it is now, and which line did
+  it). It is a set union or difference, so a member added twice is a journalled no-change. A
+  failure line takes no effect. The value is stored beside the state, journalled at `run_start`
+  and `run_end`, and shown by `--list`. Validators and probes see the current value: the run
+  fixture `data`, and the template `{data.expected}`. That lets "clustered" be judged against
+  the nodes expected **now**, not a fixed list.
 - **Agreement**: the transitions declared in the runner config and the actions' `produces` /
   `produces_on` must match, line for line, outcomes included. If they don't, the plan is
   UNDECIDED and refused before anything runs (`--list`, `--plan` and every run). An inner step
