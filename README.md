@@ -864,8 +864,11 @@ there also loads the inner-step kinds and resolvers it registers for walk action
   - `{python: support}`: the same four values as `vms` (`absent`, `up`, `halted`, `partial`),
     for the scenario's other machines.
 - the rig's **libvirt networks**, one binary region each: the validator kind
-  `{libvirt_net: <name>}` (`ext/rig/networks.py`; no import needed, it is a kind) on a variable
-  whose values are `[absent, up]`. `up` means defined, persistent, active, autostart **and**
+  `{libvirt_net: <name>}` (`ext/rig/networks.py`) on a variable whose values are `[absent, up]`.
+  The networks are read **once per look** by the `libvirt_nets` fixture (one `virsh net-list
+  --all`, each live definition at most once: every virsh call is an authorization check under
+  polkit), which the rig imports in one of its modules
+  (`from testrunner.ext.rig.networks import libvirt_nets`). `up` means defined, persistent, active, autostart **and**
   correct by `Rig.network_correct(name, live_xml)`, which has no default: a rig that declares
   networks says what a correct one is (e.g. "no host address, no forward" for an isolated LAN). A
   network with the wrong parameters, or not active, holds neither value, so a step that claimed
