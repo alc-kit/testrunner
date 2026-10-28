@@ -219,9 +219,18 @@ prints the whole of it as a table, which also goes in the journal and both repor
     - an optional first line, `stateDiagram-v2`.
 
     Anything else is refused with its line and the reason. That includes: another arrow, a
-    composite state, a note, a label without `[outcome]`, `[*]` as a target, a self-loop (not
-    yet), and a UML `/ effect` (reserved for updates of declared data). There is no `*`: write a
-    line for every value. `--list` and the reports also show each variable as a **state × event
+    composite state, a note, a label without `[outcome]`, `[*]` as a target, and a UML
+    `/ effect` (reserved for updates of declared data). There is no `*`: write a line for every
+    value.
+
+    **Every line written out.** For every value, every outcome of an action that has a
+    transition from it needs its line: `passed`, `failed`, `errored`, `aborted`, `skipped`, and
+    any outcome the action names. A missing one refuses the plan, and the message lists each as
+    `v --> ? : action [outcome]`. An outcome that changes nothing is a **self-loop**
+    (`up --> up : install [failed]`): a claim of no change, checked like any other. On a failure,
+    it is the expected end result. A self-loop is declared once, in the machine; the action's
+    `produces` claims only changes. The YAML `transitions:` form keeps the old closed world (an
+    unlisted pair claims nothing) during the migration window. `--list` and the reports also show each variable as a **state × event
     table** (`-> <to> [<outcome>]` per cell, `·` where the action claims nothing from that value);
   - how it is read back. Exactly one of these applies to a variable a transition changes:
     - an `@observer`;
