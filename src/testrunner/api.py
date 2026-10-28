@@ -141,9 +141,15 @@ def fixture(fn: Callable | None = None, *, name: str | None = None, scope: str =
 
     A generator (sync or async) yields its value; the code after the yield is the
     teardown, run when the scope ends — also when the step failed.
+
+    scope "look": set up once per LOOK — one act of judging a state variable: a derived
+    observer asking the values in order, or the check after a step (the claimed value, the
+    value before, the values the step could have moved it to). Every validator in that look
+    gets the same value, so a probe can read the system once and judge every value from that
+    one reading. Asked for outside a look (by an action, say), it is refused.
     """
-    if scope not in ("run", "step"):
-        raise ValueError(f"fixture scope must be 'run' or 'step', not {scope!r}")
+    if scope not in ("run", "step", "look"):
+        raise ValueError(f"fixture scope must be 'run', 'step' or 'look', not {scope!r}")
 
     def mark(f: Callable) -> Callable:
         setattr(f, MARK, FixtureMark(name=name or f.__name__, scope=scope))

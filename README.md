@@ -108,7 +108,12 @@ as `{from: up, to: installed, by: <action>, on: passed}`. A plain `produces: {ri
 changes the variable from any value, and is declared `from: "*"`.
 
 **Fixtures** — built in: `run`, `config`, `store`, `ui`, `registry` (per run) and `step`,
-`params`, `proc`, `state` (per step). Your own:
+`params`, `proc`, `state` (per step). Your own are per run, per step, or **per look**:
+`@fixture(scope="look")` is set up once per look, meaning one act of judging a state variable.
+That is either a derived observer asking its values in order, or the check after a step (the
+claimed value, the value before, the values the step could have moved it to). Every validator in
+that look gets the same value, so a probe reads the system once and judges every value from that
+one reading. Asked for outside a look (by an action, say), it is refused. Your own:
 ```python
 from testrunner import fixture
 
@@ -426,6 +431,9 @@ steps: command line: up..join verify
 which reads only the store), and the plan is simulated from there over every reachable branch: every
 `requires` must hold, every reaction must name an outcome its action can end with, every
 `expect.state` must be reachable. An impossible plan is refused before the first step.
+The run then starts from that same look. It does not look again, as long as the state that
+look started from is still the state the run starts from; if the store changed in between, it
+looks again. `run_start` in the journal records which one happened (`observed_before_plan`).
 
 ## Walk actions
 

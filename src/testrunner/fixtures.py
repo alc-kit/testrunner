@@ -2,7 +2,8 @@
 
 A name resolves, in order, to a value the current scope provides (the built-ins: step,
 params, proc, state, ... and run, config, store, ui), then to an exported fixture. An
-exported fixture is set up once per scope ("run" or "step"), may itself take fixtures,
+exported fixture is set up once per scope ("run", "step", or "look": one act of judging a state
+variable, see api.fixture), may itself take fixtures,
 and may be a generator (sync or async): the code after its `yield` is the teardown, run
 in reverse order when the scope closes — also after a failure.
 """
