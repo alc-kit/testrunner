@@ -21,8 +21,19 @@ states:
       absent --> up     : make [passed]
       absent --> quorum : make [failed]
       absent --> split  : make [failed]
+      absent --> absent : make [errored]
+      absent --> absent : make [aborted]
+      absent --> absent : make [skipped]
       quorum --> up     : make [passed]
+      quorum --> quorum : make [failed]
+      quorum --> quorum : make [errored]
+      quorum --> quorum : make [aborted]
+      quorum --> quorum : make [skipped]
       quorum --> up     : fix-quorum [passed]
+      quorum --> quorum : fix-quorum [failed]
+      quorum --> quorum : fix-quorum [errored]
+      quorum --> quorum : fix-quorum [aborted]
+      quorum --> quorum : fix-quorum [skipped]
 """
 MOD = """
 from pathlib import Path

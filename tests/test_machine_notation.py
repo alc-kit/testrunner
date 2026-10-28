@@ -85,7 +85,6 @@ def test_an_inner_step_can_be_the_action():
     ("[*] --> absent : up [passed]\n", "marks the initial value only"),
     ("up --> [*] : destroy [passed]\n", "a transition to `[*]`"),
     ("absent --> nowhere : up [passed]\n", "'nowhere' is not one of"),
-    ("absent --> absent : destroy [passed]\n", "a self-loop is not accepted yet"),
     ("absent --> up : up [passed]\nabsent --> up : up [passed]\n", "declared twice"),
     ("up --> absent : addnode [passed] / expected += late\n", "a UML effect"),
     ("absent --> up : up [passed]\nstateDiagram-v2\n", "may only be the first line"),
@@ -143,7 +142,11 @@ states:
     model_only: true
     machine: |
       [*]    --> absent
-      absent --> up : make [passed]
+      absent --> up     : make [passed]
+      absent --> absent : make [failed]
+      absent --> absent : make [errored]
+      absent --> absent : make [aborted]
+      absent --> absent : make [skipped]
 """)
     sub.write("m.py", """
 from testrunner import action

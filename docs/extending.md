@@ -57,7 +57,9 @@ The state model is the framework's spine. Everything else is judged against it.
    not move it backwards.
 3. **Every claim is confirmed; nothing is assumed.** Declare every transition in `states:` (the
    actions' `produces` must agree), as `transitions:` records or as a `machine:` block (Mermaid
-   lines with UML labels, `absent --> up : up [passed]`; README, "State machine"), and give
+   lines with UML labels, `absent --> up : up [passed]`; README, "State machine"; in a machine
+   block, every outcome of an action from a value has its line, a self-loop when nothing
+   changes), and give
    every value a validator. A claim is committed only
    when its validator holds. After a step whose action ended `failed`, `errored` or `aborted`,
    the transition declared for that outcome is its expected end result (an error state is
