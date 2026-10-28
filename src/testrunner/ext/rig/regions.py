@@ -6,8 +6,8 @@ is a system under test, and its probes live with it (alc-kit/proxmox-testrunner-
 Two validators and the one reading they share (a `look` fixture: one reading per act of judging):
 
     vms      the rig's cluster machines, judged against the EXPECTED nodes — the declared data
-             `expected` when the runner config declares it, else the scenario's non-late cluster
-             nodes from the catalogue:
+             `expected` when the runner config declares it, else Rig.expected_nodes() (the
+             scenario's non-late cluster nodes, unless the rig narrows them):
                absent   no domain of a cluster machine exists
                running  every expected machine runs AND answers TCP/22 (never ping: a PVE node's
                         firewall drops ICMP from the management network, measured 2026-10-28);
@@ -73,7 +73,7 @@ async def read_machines(rig: Any, expected: list[str] | None) -> dict:
     proc = Proc(rig.root, rig.logs)
     states = await rig.machines(proc).status()
     cat = rig.catalogue
-    cluster = list(expected) if expected is not None else cat.cluster_nodes()
+    cluster = list(expected) if expected is not None else rig.expected_nodes()
     support = [n for n in cat.members() if n not in cat.cluster() and n in states]
     machines = {n: states.get(n, NOT_CREATED) for n in {*cat.catalogue_cluster(), *cluster, *support}}
     running = [n for n, st in machines.items() if st == "running"]

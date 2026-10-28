@@ -286,6 +286,13 @@ class Rig:
         return self.vagrant(proc, params)
 
     # ── what exists ──
+    def expected_nodes(self) -> list[str]:
+        """The cluster nodes this rig is EXPECTED to have, when the runner config declares no data
+        `expected`: the scenario's non-late cluster nodes. A rig whose run config narrows the nodes
+        it creates (e.g. `rig.nodes`) overrides this, or the regions' probes would expect machines
+        that `up` never made (found in lab's sandbox, B6)."""
+        return self.catalogue.cluster_nodes()
+
     async def reachable(self, ip: str, port: int = 22, timeout: float = 3.0) -> bool:
         """Does `ip:port` accept a TCP connection? The regions' probes ask this (ext/rig/regions.py:
         a machine "runs" only when it also answers). Real TCP by default — never ping (a PVE node's
