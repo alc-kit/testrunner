@@ -140,3 +140,28 @@ def test_a_rig_can_override_reachable(rig_root, tmp_path, monkeypatch):
     monkeypatch.setattr(regions, "answers", never)
     r = asyncio.run(read_machines(rig, None))
     assert judge_vms(r, "partial")[0] and not judge_vms(r, "running")[0]
+
+
+def test_the_rig_says_which_nodes_are_expected_without_data(rig_root, tmp_path, monkeypatch):
+    # a run config that narrows the nodes `up` creates (lab's rig.nodes): the probe must not expect
+    # the others (found in lab's sandbox, B6)
+    no_vagrant(tmp_path, monkeypatch)
+    fake = FakeProvider({"cache": "running", "hub": "running", "n1": "not_created", "n2": "running",
+                         "n3": "not_created", "n4": "not_created", "arb": "not_created"})
+
+    class OwnRig(Rig):
+        def machines(self, proc, params=None):
+            return fake
+
+        async def domains_left(self, proc):
+            return ["myrig_n2"]
+
+        async def reachable(self, ip, port=22, timeout=3.0):
+            return True
+
+        def expected_nodes(self):
+            return ["n2"]
+    rig = OwnRig(rig_root, yaml.safe_load(DEFAULT), rig_root / "configs" / "default.yml", "default")
+    r = asyncio.run(read_machines(rig, None))
+    assert r["expected"] == ["n2"] and judge_vms(r, "running")[0]
+    assert asyncio.run(read_machines(rig, ["n1", "n2"]))["expected"] == ["n1", "n2"]   # declared data wins
