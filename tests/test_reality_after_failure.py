@@ -21,7 +21,7 @@ scenario: {release_when: {sys: absent}}
 """
 MOD = """
 from pathlib import Path
-from testrunner import action, observer
+from testrunner import action, hook, observer
 
 SYS = Path(__file__).parent / "system"
 
@@ -35,6 +35,11 @@ def look():
 def build_then_fail():
     SYS.mkdir(exist_ok=True)            # the system now exists ...
     raise RuntimeError("a host tool is missing")   # ... and the step fails anyway
+
+@hook("run_end")
+def seen_at_the_end(run):
+    import json
+    (Path(__file__).parent / "state-at-run-end").write_text(json.dumps(run.state))
 
 @action(produces={"sys": {"absent": "up"}})
 def fail_cleanly():
@@ -66,6 +71,8 @@ def test_a_failed_step_that_built_the_system_never_releases_the_scenario(sub, ca
     assert code == 1
     assert stored(sub)["sys"] == "absent"                   # kept, not judged
     assert scenario_kept(sub) and "scenario released" not in out
+    # the release look read 'up' into a copy: what the run hands its run_end hooks is the kept value
+    assert json.loads((sub.root / "state-at-run-end").read_text())["sys"] == "absent"
 
 
 def test_a_failed_step_that_changed_nothing_still_releases(sub, capsys):
