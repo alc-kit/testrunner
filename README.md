@@ -853,7 +853,8 @@ there also loads the inner-step kinds and resolvers it registers for walk action
   (`from testrunner.ext.rig.regions import machines_reading, support, vms`), because an
   extension's validators and fixtures are the subscriber's call:
   - `{python: vms}`: `absent`, `running`, `halted` or `partial`. It is judged against the
-    declared data `expected` when there is any, else the catalogue's cluster nodes. `running`
+    declared data `expected` when there is any, else `Rig.expected_nodes()`: the catalogue's
+    cluster nodes, unless the rig narrows them (a run config's node subset). `running`
     means every expected machine runs **and** answers TCP/22; it never pings. "Answers" is
     `Rig.reachable(ip)`: real TCP, unless the rig overrides it (e.g. for a sandbox of fakes).
   - `{python: support}`: the same four values as `vms` (`absent`, `up`, `halted`, `partial`),
