@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TextIO
 
-from .api import (ABORTED, BUILTIN_OUTCOMES, CANNOT_TELL, ERRORED, FAILED, PASSED, SKIPPED, Outcome,
+from .api import (ABORTED, BUILTIN_OUTCOMES, CANNOT_TELL, NONE_HOLDS, ERRORED, FAILED, PASSED, SKIPPED, Outcome,
                   OutcomeError)
 from .config import RunConfig, RunnerConfig, deep_merge, lookup, program_name
 from .discovery import ActionSpec, Registry
@@ -283,7 +283,14 @@ class Runner:
         try:
             for var in self.reg.observers:
                 try:
-                    out[var] = await self._observe(var, scope)
+                    seen = await self._observe(var, scope)
+                    if seen == NONE_HOLDS:
+                        log.warning("before the plan: observer for %s: no value holds; %s is UNKNOWN (the store "
+                                    "said %r)", var, var, out.get(var))
+                        self.say(self.style.warn(f"observer for {var}: no value of {var} holds — {var} is UNKNOWN "
+                                                 f"(the store said {out.get(var)!r})"))
+                        seen = None
+                    out[var] = seen
                     read.append(var)
                 except ObserverCannotTell as e:
                     log.warning("before the plan: %s; %s stays %r (stored)", e, var, out.get(var))
@@ -587,6 +594,17 @@ class Runner:
                                 type(e).__name__, e, run.state.get(var))
                     blind.add(var)
                     continue
+                if seen == NONE_HOLDS:
+                    was = run.state.get(var)
+                    why = (f"{where}: the observer for {var} looked, and no value of {var} holds "
+                           f"(the model said {was!r}) — {var} is UNKNOWN: no step that requires it will run, "
+                           f"and the scenario is not released")
+                    log.warning("%s", why)
+                    if was is not None:
+                        self.say(self.style.bad(f"     {why}"))
+                        self.journal("state_unknown", step=where, var=var, was=was, observed=NONE_HOLDS, why=why)
+                    run.state[var] = None
+                    continue
                 if seen != run.state.get(var):
                     log.warning("%s: observed %s=%r, the model said %r — reality wins", where, var, seen,
                                 run.state.get(var))
@@ -762,6 +780,14 @@ class Runner:
             was, seen = model.get(var), run.state.get(var)
             if was is None or seen == was:
                 continue
+            if seen is None:
+                # the observer looked and no value holds (journalled as state_unknown by _reobserve)
+                why = (f"{sid} ({act.name}): after the step the observer for {var} finds no value of {var} "
+                       f"holding (the model said {was!r}) — {var} is now UNKNOWN (no step that requires it "
+                       f"will run, and the scenario is not released). Look at the step's log and the trace; "
+                       f"`{program_name()} --plan` reads it again.")
+                clashes.append(why)
+                continue
             claimed_here = any(t.by == claimer(act) for t in self.rc.states[var].transitions)
             walks = [f.walk.name for f in self._frames if f.walk is not None]
             covering = [t for t in self.rc.states[var].transitions
@@ -811,6 +837,8 @@ class Runner:
         log.info("observer %s says %r (%.2fs)", var, value, time.monotonic() - t)
         if value == CANNOT_TELL:
             raise ObserverCannotTell(f"observer for {var} cannot tell (it read no value)")
+        if value == NONE_HOLDS:
+            return NONE_HOLDS               # it looked: none of the values holds -> the caller makes it UNKNOWN
         if value is not None and value not in self.rc.states[var]["values"]:
             raise FixtureError(f"observer for {var} returned {value!r}, not one of {self.rc.states[var]['values']}")
         return value
@@ -839,9 +867,11 @@ class Runner:
         finally:
             await look.close()
             self._frames.pop()
-        raise FixtureError(f"cannot read {sv.name} in order {sv.order}: "
-                           + "; ".join(v.text() for v in asked)
-                           + ("" if asked[-1].answer == CANNOT_TELL else " — no value holds"))
+        if asked and asked[-1].answer == CANNOT_TELL:
+            raise ObserverCannotTell(f"observer for {sv.name} cannot tell (in order {sv.order}: "
+                                     + "; ".join(v.text() for v in asked) + ")")
+        log.warning("observe %s: no value holds (%s)", sv.name, "; ".join(v.text() for v in asked))
+        return NONE_HOLDS
 
     async def _retry_wanted(self, run: RunContext, run_scope: Scope, step: Step, sr: StepResult, attempt: int,
                             index: str, data: dict, program: Program, prefix: str = "") -> tuple[bool, str]:
