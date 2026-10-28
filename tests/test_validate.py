@@ -2,9 +2,10 @@
 user 2026-10-27): a claim is committed only when its validator HOLDS; a claim that does not hold,
 or a validator that cannot tell, fails the step; after a step that claims nothing (or whose
 claim did not hold) the value before and every declared target are asked, and exactly one may
-hold, otherwise the variable is UNKNOWN and the step fails with the whole story. A step the ACTION
-ends failed, errored or aborted is NOT JUDGED (user 2026-10-28, §8.7.8): no validator is asked, and
-the value from before is kept. Each rule has its negative control."""
+hold, otherwise the variable is UNKNOWN and the step fails with the whole story. After a step the
+ACTION ends failed, errored or aborted, only a DECLARED expected end result is checked
+(test_failure_end_result.py); with none declared (these tests), no validator is asked and the value
+from before is kept. Each rule has its negative control."""
 import json
 
 import pytest
@@ -139,7 +140,7 @@ def test_control_without_a_validator_that_looks_a_passed_claim_is_accepted(sub, 
 
 # ── after a failure, nothing is assumed ─────────────────────────────────────
 
-def test_a_failed_step_is_not_judged_and_keeps_the_value_from_before(sub, capsys):
+def test_a_failure_with_no_end_result_declared_keeps_the_value_from_before(sub, capsys):
     # make builds the system, then fails: NOT judged (user 2026-10-28) — the value from before
     # stays, no validator is asked, and the release (decided on what IS) still keeps the scenario
     s = make_sub(sub, absent="{python: sys-is}", up="{python: sys-is}")
@@ -152,7 +153,7 @@ def test_a_failed_step_is_not_judged_and_keeps_the_value_from_before(sub, capsys
     assert "scenario released" not in out                # the system IS up: the release look sees it
 
 
-def test_an_errored_step_is_not_judged_either(sub, capsys):
+def test_an_errored_step_with_no_end_result_declared_keeps_it_too(sub, capsys):
     # errored (here: the action returns an outcome it does not declare) is a failure like failed
     mod = MOD.replace("""    if knob("make-fails"):
         raise RuntimeError("make failed")""", """    if knob("make-fails"):
@@ -234,7 +235,7 @@ actions:
     assert events(ev, "state_changed")[0]["confirmed_by"]["kind"] == "outcome"
     (sub.root / "state" / "state.json").unlink()
     sub.write("tidy-fails", "")                         # compile + fetch passed, the walk failed after:
-    code, out, ev, state = run(sub, capsys, "build")    # a failed walk is not judged (user 2026-10-28)
+    code, out, ev, state = run(sub, capsys, "build")    # a failed walk with no end result declared keeps the value
     assert code == 1 and state["sys"] == "absent"
     assert events(ev, "state_kept")[-1]["outcome"] == "failed"
 
@@ -242,7 +243,7 @@ actions:
 def test_validators_that_would_contradict_each_other_are_not_asked_after_a_failure(sub, capsys):
     # absent's validator says "a failed step changed nothing", up's says "compile and fetch
     # passed": after a later failure both would hold (the machine is undefined there). A failure
-    # is not judged, so neither is asked, and the value from before is kept.
+    # has no declared end result, so neither is asked, and the value from before is kept.
     sub.write("testrunner.yml", """
 action_files: [walks.yml]
 states:

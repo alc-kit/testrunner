@@ -32,11 +32,12 @@ from .statemachine import ANY, DerivedObserver, claimer, describe
 from .validate import BEFORE, CLAIMED, OBSERVE, Claim, Verdict, judge
 
 NOT_LOOKING = ("outcome", "const")        # validator kinds that confirm without looking at the system
-# A step that ends on one of these is NOT JUDGED (user 2026-10-28, WP testrunner-state-validation
-# §8.7.8): no validator asks what it left, no observer overwrites the model after it, and every
-# variable it was about keeps the value from before the step — "it is a failure that needs live
-# actions to remediate".
-NOT_JUDGED = (FAILED, ERRORED, ABORTED)
+# The failures (user 2026-10-28, WP testrunner-state-validation §8.7.8, amended): after one, the
+# transition declared for (value, action, that outcome) is the failure's EXPECTED END RESULT, and
+# its validator is asked. Found: the variable moves there, and the plan's rules route the step (a
+# deviation that repairs the rig, say). Not found: the test fails, the run stops whatever the rules
+# say, the value from before is kept, and the observer's reading is recorded, never applied.
+FAILURES = (FAILED, ERRORED, ABORTED)
 from .proc import DEFAULT_PROMPT_PATTERN, Proc
 from . import report
 from .log import STEP
@@ -67,6 +68,7 @@ class StepResult:
     verdict: str = ""
     seconds: float = 0.0
     state: dict[str, Any] = field(default_factory=dict)
+    stop: str = ""      # the run must stop here whatever the rules say (a failure's expected end result not found)
 
 
 @dataclass
@@ -208,7 +210,8 @@ class Runner:
         # looking again, but only while the state it started from is still the state the run
         # starts from
         self._pre_look: dict | None = None
-        # variables a failed step left at the value from before (not judged): the release look
+        # variables a failed step left at the value from before (its end result not found, or none
+        # declared): the release look
         # reads reality to decide the release, and never overwrites these
         self._kept: set[str] = set()
         self.dry_not_run: list[str] = []               # python actions a dry run did not run
@@ -432,7 +435,7 @@ class Runner:
             elif not self.readonly and not self.dry and rw and self.store.get_scenario() is not None:
                 # judged on what IS, never on the model alone: re-read every observed
                 # variable release_when names; one that cannot be read keeps the scenario
-                # after a failure the recorded values are kept (not judged); the release is still
+                # after a failure the kept values stay (end result not found, or none declared); the release is still
                 # decided on what IS (the 2026-10-11 incident), read into a copy
                 seen = dict(run.state) if self._kept else None
                 blind = await self._reobserve(run, run_scope, "(release)", only=set(rw), into=seen)
@@ -535,6 +538,16 @@ class Runner:
                     log.warning("aborted: the always step(s) %s do NOT run", [prefix + a for a in always])
                     self.journal("always_not_run", steps=[prefix + a for a in always], why="aborted")
                 return WalkEnd(False, "aborted by the operator", ABORTED, "aborted by the operator")
+            if sr.stop:
+                # a failure's expected end result was not found: the test fails here, and no rule
+                # routes it on (user 2026-10-28)
+                sr.verdict = "failed"
+                log.info("after %s ended %s: its expected end result was not found -> the run stops", full,
+                         sr.outcome)
+                end = WalkEnd(False, f"{sr.id}: the expected end result of its failure was not found", sr.outcome,
+                              prefix + sr.stop)
+                early = True
+                break
             t = walker.next(cur, sr.outcome, run.state)
             sr.verdict = t.verdict
             log.info("after %s ended %s: verdict %s%s; next %s", full, sr.outcome, t.verdict,
@@ -641,24 +654,70 @@ class Runner:
         return blind
 
     # ── claims: confirmed, never assumed (WP testrunner-state-validation §3.3) ──
-    def _keep_after_failure(self, run: RunContext, act: ActionSpec, ctx: StepContext, outcome: Outcome) -> dict:
-        """A step that failed, errored or was aborted is NOT JUDGED: no validator asks what it
-        left. Every variable it has a transition for (from the value it has now) keeps that
-        value, the last confirmed state — the run did not complete its mission, and the bench
-        needs live examination before anything progresses (user 2026-10-28). Returns the state
-        before, as _settle does."""
+    async def _settle_failure(self, run: RunContext, act: ActionSpec, ctx: StepContext, outcome: Outcome,
+                              scope: Scope, proc: Proc, results: list) -> tuple[dict, str, bool]:
+        """After the ACTION ended failed, errored or aborted (user 2026-10-28, amended): for every
+        variable it has a transition for, the line declared for (value, action, that outcome) is
+        the failure's expected end result, and its validator is asked.
+        - found: the variable moves there; the step stays failed, and its rules route it;
+        - not found (does not hold, cannot tell): the value from before is kept, and the run must
+          stop whatever the rules say — the bench is in a state nobody declared;
+        - no line: the value from before is kept (nothing was declared to look for).
+        Returns (the state before, why the run must stop or "", record_only): record_only means a
+        value was kept, so the observer's reading after the step is recorded, never applied."""
         before = dict(run.state)
+        ctx.looked = set()
         by = claimer(act)
-        for var, sv in self.rc.states.items():
-            cur = run.state.get(var)
-            if not [t for t in sv.transitions_by(by) if t.frm in (cur, ANY)]:
-                continue
-            self._kept.add(var)
-            log.info("%s: ended %s: %s keeps %r — not judged (a failure needs live remediation)", ctx.id,
-                     outcome.name, var, cur)
-            self.journal("state_kept", step=ctx.id, var=var, value=cur, outcome=outcome.name,
-                         why="not judged: a failure needs live remediation; the value from before is kept")
-        return before
+        inner = {r.id[len(ctx.id) + 1:]: r.outcome for r in results if r.id.startswith(ctx.id + "/")}
+        stops: list[str] = []
+        kept = False
+        looks: list[Scope] = []
+        try:
+            for var, sv in self.rc.states.items():
+                cur = run.state.get(var)
+                here = [t for t in sv.transitions_by(by) if t.frm in (cur, ANY)]
+                if not here:
+                    continue
+                lines = sorted({t.to for t in here if t.on == outcome.name})
+                if not lines:
+                    self._kept.add(var)
+                    kept = True
+                    log.info("%s: ended %s: %s keeps %r — no expected end result is declared for this failure",
+                             ctx.id, outcome.name, var, cur)
+                    self.journal("state_kept", step=ctx.id, var=var, value=cur, outcome=outcome.name,
+                                 why="no expected end result is declared for this failure; the value from before is kept")
+                    continue
+                to, = lines                      # one end result per (value, action, outcome): enforced at load
+                look = Scope("look", {}, parent=scope)
+                looks.append(look)
+                v = await self._validate(sv, Claim(var, to, CLAIMED, ctx.id, outcome.name, True, inner,
+                                                   f"{ctx.file_id}.validate.{var}.{to}.log"), look, proc, ctx, act)
+                if v.holds:
+                    run.state[var] = to
+                    if v.kind not in NOT_LOOKING:
+                        ctx.looked.add(var)
+                    if to == cur:
+                        self.journal("state_checked", step=ctx.id, var=var, value=cur, outcome=outcome.name,
+                                     verdicts=[v.record()], note="the failure's declared end result")
+                    else:
+                        self._state_event("state_changed", ctx, var, cur, to, by, outcome.name, v,
+                                          note="the failure's declared end result")
+                    continue
+                self._kept.add(var)
+                kept = True
+                why = (f"{ctx.id} ({act.name}) ended {outcome.name}, and its expected end result {var}={to!r} was "
+                       f"NOT found ({v.answer}: {v.why}) — the test fails here, whatever the plan's rules say. "
+                       f"{var} keeps {cur!r} (the value from before); what the observers read is recorded "
+                       f"(observed_after_failure).")
+                log.warning("%s", why)
+                self.say(self.style.bad(why))
+                self.journal("state_kept", step=ctx.id, var=var, value=cur, outcome=outcome.name,
+                             verdicts=[v.record()], why=why)
+                stops.append(why)
+        finally:
+            for look in looks:
+                await look.close()
+        return before, "\n".join(stops), kept
 
     async def _settle(self, run: RunContext, act: ActionSpec, ctx: StepContext, outcome: Outcome,
                       scope: Scope, proc: Proc, results: list) -> tuple[Outcome, dict]:
@@ -1010,6 +1069,8 @@ class Runner:
             await self.hook("step_start", run=run, step=ctx)
         settled: dict | None = None       # the state before the step, once its effects are settled
         ended: str | None = None          # the outcome the ACTION ended on, before any claim was judged
+        stop_why = ""                     # a failure's expected end result not found: the run stops here
+        record_only = False               # a value was kept after a failure: observe, record, never apply
         ok, unknown = requires_holds(act.requires, run.state)
         log.info("%s: requires %s against state %s -> %s", sid, act.requires or "{}", run.state,
                  "unknown value(s) " + ", ".join(unknown) if ok and unknown else "holds" if ok else "DOES NOT HOLD")
@@ -1049,8 +1110,9 @@ class Runner:
                           act.name, sorted(act.all_outcomes))
                 outcome = Outcome(ERRORED, f"returned undeclared outcome {outcome.name!r} ({outcome.detail})")
             ended = outcome.name
-            if not self.dry and ended in NOT_JUDGED:
-                settled = self._keep_after_failure(run, act, ctx, outcome)
+            if not self.dry and ended in FAILURES:
+                settled, stop_why, record_only = await self._settle_failure(run, act, ctx, outcome, scope, proc,
+                                                                            run.results[first_result:])
             elif not self.dry:
                 # every claim is CONFIRMED by its validator, and a step that claims nothing (or
                 # whose claim failed) is checked for what it really left — while the step's
@@ -1094,11 +1156,17 @@ class Runner:
         elif self.dry:
             # nothing was changed, so reality would only undo the walk's own model of it
             log.debug("%s: dry run: reality not re-read (the model carries the walk)", sid)
-        elif ended in NOT_JUDGED:
-            # the ACTION ended so; a step that passed and whose claim did not hold was judged (and
-            # failed by that judgement): reality is read after it as after any judged step
-            log.info("%s: ended %s: not judged, reality not re-read after it (the values from before are kept; "
-                     "the next run's start look reads the bench as it is)", sid, outcome.name)
+        elif record_only:
+            # a failure left a value KEPT (its expected end result not found, or none declared):
+            # what the observers can attest is recorded — "that the play failed, and what is
+            # observable on the current rig" — and never applied to the kept value
+            seen = dict(run.state)
+            blind = await self._reobserve(run, run_scope, sid, into=seen)
+            reading = {k: seen.get(k) for k in self.reg.observers if k not in blind}
+            log.info("%s: ended %s: the observers attest %s (recorded; the kept values stay)%s", sid,
+                     outcome.name, reading or "nothing", f"; could not read {sorted(blind)}" if blind else "")
+            self.journal("observed_after_failure", step=sid, outcome=outcome.name, observed=reading,
+                         could_not_read=sorted(blind))
         else:
             outcome = await self._reobserve_after(run, run_scope, ctx, act, outcome)
         if outcome.name == expect.outcome:
@@ -1119,7 +1187,7 @@ class Runner:
             self.store.set_state(run.state)
         outcome = Outcome(outcome.name, self.secrets.text(outcome.detail))
         sr = StepResult(sid, act.name, outcome.name, outcome.detail,
-                        seconds=time.monotonic() - started, state=dict(run.state))
+                        seconds=time.monotonic() - started, state=dict(run.state), stop=stop_why)
         run.results.append(sr)
         run.current = None
         # step_end hooks run BEFORE the journal line, so the metrics they record land in it
