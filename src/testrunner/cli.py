@@ -48,6 +48,7 @@ from .nolog import Secrets, values_at
 from .planner import Compiler, initial_state, matrix, matrix_text, reaction_text, simulate
 from .runner import Runner
 from .scenario import describe, new_run_id, select
+from .statemachine import table_text
 from .store import LockedError, Store
 from .term import Style, color_enabled
 from .ui import InputBroker
@@ -484,6 +485,8 @@ def listing(rc, reg) -> int:
                       + (f"  — validate {{{spec_text(v)}}}" if v else ""))
             for t in sv.transitions:
                 print(f"    {t.frm} -> {t.to}  by {t.by} on {t.on}")
+            for line in table_text(sv):
+                print(line)
     if reg.fixtures:
         print("fixtures:")
         for f in reg.fixtures.values():

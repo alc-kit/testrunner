@@ -23,9 +23,28 @@ it is refused before anything runs. Undefined behaviour is a failure, never a de
 
 The transitions are the COMPLETE list for the variable: an action/outcome pair that is not in
 it changes nothing, and an action may not claim otherwise.
+
+The same machine can be written as a `machine:` block instead of `initial` + `transitions`
+(D8, user 2026-10-28): Mermaid stateDiagram-v2 lines with UML labels, which render on GitHub
+unchanged when pasted into a ```mermaid fence:
+
+    states:
+      rig:
+        values: [absent, up, installed]
+        validate: {outcome: true}
+        machine: |
+          [*]    --> absent
+          absent --> up        : up [passed]
+          up     --> installed : install [passed]
+
+The accepted subset is exactly: an optional `stateDiagram-v2` first line, `[*] --> <value>` (the
+initial value, at most once), `<value> --> <value> : <action> [<outcome>]`, and `%%` comments on
+their own line. Anything else is refused with its line and the reason. The YAML records stay
+valid during the migration window; a variable uses one form, not both.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,7 +52,13 @@ from typing import Any
 from .config import ConfigError
 
 ANY = "*"                       # a transition from any value (a plain `produces: {var: value}`)
-VAR_KEYS = {"values", "initial", "validate", "transitions", "observe", "model_only"}
+VAR_KEYS = {"values", "initial", "validate", "transitions", "machine", "observe", "model_only"}
+# the machine: notation (D8): Mermaid state ids, UML `action [outcome]` labels
+_STATE_ID = r"[A-Za-z_][A-Za-z0-9_]*"
+_ACTION = r"[A-Za-z0-9_][A-Za-z0-9_./-]*"
+_OUTCOME = r"[A-Za-z_][A-Za-z0-9_-]*"
+_INITIAL_RE = re.compile(rf"^\[\*\]\s*-->\s*({_STATE_ID})$")
+_LINE_RE = re.compile(rf"^({_STATE_ID})\s*-->\s*({_STATE_ID})\s*:\s*({_ACTION})\s*\[\s*({_OUTCOME})\s*\]$")
 VALUE_KEYS = {"criterion", "validate"}
 TRANSITION_KEYS = {"from", "to", "by", "on"}
 OBSERVE_KEYS = {"order"}
@@ -61,6 +86,7 @@ class StateVar:
     transitions: list[Transition] = field(default_factory=list)
     order: list[str] | None = None          # observe: {order}: an observer derived from validators
     model_only: bool = False                # nothing re-reads it: its value is the model's claim
+    form: str = "transitions"               # how the runner config declares it: `transitions` or `machine`
 
     # the dict shape the rest of testrunner reads (rc.states[var]["values"], .get("initial"))
     def __getitem__(self, key: str) -> Any:
@@ -127,7 +153,15 @@ def _parse_var(path: Path, var: str, spec: Any) -> StateVar:
         default = _validator_shape(f"{where}.validate", spec["validate"])
         validators = {v: default for v in values}
     validators.update(own_validators)
-    transitions = _parse_transitions(where, var, values, spec.get("transitions"))
+    if "machine" in spec:
+        for other in ("transitions", "initial"):
+            if other in spec:
+                raise ConfigError(f"{where}: `machine` and `{other}` exclude each other — the machine block "
+                                  f"declares {'its transitions' if other == 'transitions' else 'the initial value ([*] --> <value>)'}; "
+                                  f"declare one form")
+        initial, transitions = parse_machine(where, var, values, spec["machine"])
+    else:
+        transitions = _parse_transitions(where, var, values, spec.get("transitions"))
     order = None
     if "observe" in spec:
         obs = spec["observe"]
@@ -143,7 +177,8 @@ def _parse_var(path: Path, var: str, spec: Any) -> StateVar:
         raise ConfigError(f"{where}.model_only: want true or false")
     if model_only and order is not None:
         raise ConfigError(f"{where}: model_only and observe exclude each other — declare one")
-    return StateVar(var, values, initial, criteria, validators, transitions, order, model_only)
+    return StateVar(var, values, initial, criteria, validators, transitions, order, model_only,
+                    form="machine" if "machine" in spec else "transitions")
 
 
 def _parse_transitions(where: str, var: str, values: list[str], raw: Any) -> list[Transition]:
@@ -178,6 +213,98 @@ def _parse_transitions(where: str, var: str, values: list[str], raw: Any) -> lis
         out.append(tr)
     return out
 
+
+
+def parse_machine(where: str, var: str, values: list[str], text: Any) -> tuple[str | None, list[Transition]]:
+    """A `machine:` block (D8): Mermaid stateDiagram-v2 lines with UML `action [outcome]` labels.
+    Returns (initial value or None, transitions). Every line outside the accepted subset is refused
+    with its line number and the reason: explicit rather than implicit, undefined is a failure."""
+    w = f"{where}.machine"
+    if not isinstance(text, str) or not text.strip():
+        raise ConfigError(f"{w}: want a block of lines (`machine: |`), e.g. `[*] --> absent` and "
+                          f"`absent --> up : up [passed]`")
+    initial: str | None = None
+    out: list[Transition] = []
+    seen_body = False
+    for n, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        at = f"{w} line {n} ({line!r})"
+        if not line or line.startswith("%%"):
+            continue
+        if line == "stateDiagram-v2":
+            if seen_body:
+                raise ConfigError(f"{at}: `stateDiagram-v2` may only be the first line")
+            seen_body = True
+            continue
+        seen_body = True
+        if "%%" in line:
+            raise ConfigError(f"{at}: a `%%` comment must be on its own line (Mermaid does not accept one "
+                              f"after a statement, so the block would not render)")
+        m = _INITIAL_RE.match(line)
+        if m:
+            if initial is not None:
+                raise ConfigError(f"{at}: a second `[*] -->` line; the initial value is declared once "
+                                  f"(already {initial!r})")
+            if m.group(1) not in values:
+                raise ConfigError(f"{at}: {m.group(1)!r} is not one of {values}")
+            initial = m.group(1)
+            continue
+        if line.startswith("[*]"):
+            raise ConfigError(f"{at}: `[*]` marks the initial value only: `[*] --> <value>`, with no label")
+        if re.search(r"-->\s*\[\*\]", line):
+            raise ConfigError(f"{at}: a transition to `[*]` (an end state) has no meaning here; a value is "
+                              f"never left for 'nothing'")
+        if "/" in line.split(":", 1)[-1] and "[" in line and line.rsplit("]", 1)[-1].strip().startswith("/"):
+            raise ConfigError(f"{at}: a UML effect (`/ ...`) is not accepted yet; it is reserved for "
+                              f"updates of declared data (`/ expected += ...`, WP step B4)")
+        m = _LINE_RE.match(line)
+        if not m:
+            raise ConfigError(f"{at}: not a machine line. Accepted: `[*] --> <value>`, "
+                              f"`<value> --> <value> : <action> [<outcome>]`, `%%` comments on their own line "
+                              f"(and an optional first line `stateDiagram-v2`)")
+        frm, to, by, on = m.groups()
+        for v in (frm, to):
+            if v not in values:
+                raise ConfigError(f"{at}: {v!r} is not one of {values}")
+        if frm == to:
+            raise ConfigError(f"{at}: from and to are both {to!r}: a self-loop is not accepted yet (it arrives "
+                              f"with every outcome written out, WP step B3)")
+        tr = Transition(var, by, on, frm, to)
+        if tr in out:
+            raise ConfigError(f"{at}: declared twice ({tr.text()})")
+        out.append(tr)
+    return initial, out
+
+
+def state_event_table(sv: "StateVar") -> tuple[list[str], dict[str, dict[str, list[str]]]]:
+    """The machine as a state x event table (D8): (the actions, in declaration order; {value:
+    {action: ["-> <to> [<outcome>]", ...]}}). A transition from any value (`*`, the YAML form) is
+    expanded into every row and marked "(any)". An empty cell is a pair that claims nothing."""
+    actions: list[str] = []
+    for t in sv.transitions:
+        if t.by not in actions:
+            actions.append(t.by)
+    rows: dict[str, dict[str, list[str]]] = {v: {a: [] for a in actions} for v in sv.values}
+    for t in sv.transitions:
+        for v in (sv.values if t.frm == ANY else [t.frm]):
+            rows[v][t.by].append(f"-> {t.to} [{t.on}]" + (" (any)" if t.frm == ANY else ""))
+    return actions, rows
+
+
+def table_text(sv: "StateVar", indent: str = "    ") -> list[str]:
+    """The state x event table as text lines (for --list). '·' = claims nothing."""
+    actions, rows = state_event_table(sv)
+    if not actions:
+        return []
+    cells = {v: {a: ", ".join(rows[v][a]) or "·" for a in actions} for v in sv.values}
+    w0 = max(len(v) for v in sv.values)
+    ws = {a: max([len(a)] + [len(cells[v][a]) for v in sv.values]) for a in actions}
+    head = indent + " " * w0 + " | " + " | ".join(a.ljust(ws[a]) for a in actions)
+    out = [head, indent + "-" * w0 + "-+-" + "-+-".join("-" * ws[a] for a in actions)]
+    out += [indent + v.ljust(w0) + " | " + " | ".join(cells[v][a].ljust(ws[a]) for a in actions)
+            for v in sv.values]
+    out.append(indent + "· = this action claims nothing from this value")
+    return out
 
 def _validator_shape(where: str, spec: Any) -> dict:
     """Only the shape here (one kind key); the kind itself is checked once every extension's
@@ -224,16 +351,20 @@ def check_agreement(reg: Any, states: dict[str, StateVar]) -> None:
                 continue                # {x: x} in a transition map: no change, nothing to agree on
             claimed[t] = act.source
     declared = {t for sv in states.values() for t in sv.transitions}
+
+    def where(var: str) -> str:
+        sv = states.get(var)
+        return f"states.{var}.{sv.form if sv else 'transitions'}"
     problems = []
     for t in sorted(set(claimed) - declared):
         problems.append(f"  {t.text()}: claimed by the action ({claimed[t]}), "
-                        f"NOT declared under states.{t.var}.transitions")
+                        f"NOT declared under {where(t.var)}")
     for t in sorted(declared - set(claimed)):
         act = reg.actions.get(t.by)
         if act is None:
             problems.append(f"  {t.text()}: declared, but there is no action {t.by!r}")
         else:
-            problems.append(f"  {t.text()}: declared under states.{t.var}.transitions, NOT claimed by "
+            problems.append(f"  {t.text()}: declared under {where(t.var)}, NOT claimed by "
                             f"the action ({act.source}: its produces/produces_on)")
     if problems:
         raise ConfigError("the plan is UNDECIDED: the runner config's transitions and the actions' claims "
@@ -281,6 +412,7 @@ def describe(states: dict[str, StateVar], reg: Any) -> list[dict]:
                         "validator": spec_text(sv.validators[v]) if v in sv.validators else ""}
                        for v in sv.values],
             "transitions": [{"from": t.frm, "to": t.to, "by": t.by, "on": t.on} for t in sv.transitions],
+            "table": dict(zip(("actions", "rows"), state_event_table(sv))),
         })
     return out
 
