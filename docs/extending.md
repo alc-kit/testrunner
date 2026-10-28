@@ -49,7 +49,9 @@ The state model is the framework's spine. Everything else is judged against it.
    the observer before it judges the plan. An observer that cannot tell which value it is (it
    sees that something exists, but not how far along it is) returns `CANNOT_TELL`, never its best
    guess. A guess is stored as reality; `CANNOT_TELL` keeps the value the model had, and an
-   unknown stays unknown.
+   unknown stays unknown. An observer that looked and found the system in none of the values
+   returns `NONE_HOLDS`, and the variable becomes unknown. That is different from "could not
+   look", and the runner treats it differently.
 2. **Values form a lifecycle,** and actions move along it. Use a transition map,
    `produces: {rig: {up: installed}}`, when re-running a step on a system that is further along must
    not move it backwards.
