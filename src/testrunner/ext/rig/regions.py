@@ -14,10 +14,12 @@ Two validators and the one reading they share (a `look` fixture: one reading per
                halted   every expected machine exists, and none runs
                partial  anything else (some exist, some run, or one runs but does not answer)
     support  the scenario's other machines that the Vagrantfile defines (a cache, a Tang server,
-             a quorum host — whatever the catalogue lists that is not a cluster node):
-               up       every one runs and answers TCP/22
+             a quorum host — whatever the catalogue lists that is not a cluster node), the same
+             four values as vms (user 2026-10-28: a rig's shutdown powers them off too):
                absent   none exists
-             anything between holds neither value (a derived observer answers NONE_HOLDS).
+               up       every one runs and answers TCP/22
+               halted   every one exists, and none runs
+               partial  anything else
 
 Declare them as `validate: {python: vms}` / `{python: support}` on a variable whose values are
 exactly those names, and `observe: {order: [...]}` to read the variable from them.
@@ -39,7 +41,7 @@ log = logging.getLogger(__name__)
 
 TCP_TIMEOUT = 3.0
 VMS_VALUES = ("absent", "running", "halted", "partial")
-SUPPORT_VALUES = ("absent", "up")
+SUPPORT_VALUES = ("absent", "up", "halted", "partial")
 
 
 async def answers(ip: str, port: int = 22, timeout: float = TCP_TIMEOUT) -> bool:
@@ -109,10 +111,17 @@ def judge_support(reading: dict, value: str) -> tuple[bool, str]:
     st = reading["states"]
     ans = reading["answers"]
     seen = ", ".join(f"{n}={st[n]}" for n in sup) or "the scenario has no support machine"
+    up = all(st[n] == "running" and ans.get(n) for n in sup)
+    absent = all(st[n] == NOT_CREATED for n in sup)
+    halted = bool(sup) and all(st[n] not in (NOT_CREATED, "running") for n in sup)
     if value == "up":
-        return all(st[n] == "running" and ans.get(n) for n in sup), seen
+        return up, seen
     if value == "absent":
-        return all(st[n] == NOT_CREATED for n in sup), seen
+        return absent, seen
+    if value == "halted":
+        return halted, seen
+    if value == "partial":
+        return not (up or absent or halted), seen
     return False, f"{value!r} is not a support value ({', '.join(SUPPORT_VALUES)})"
 
 

@@ -1,6 +1,6 @@
 """The generic regions, vms and support (WP testrunner-state-validation §10 B5a). Each value both ways;
-the expected nodes come from the declared data when there is any (D9: 'up after pve-val-4 was added
-and pve-val-1 removed'), else the catalogue."""
+the expected nodes come from the declared data when there is any (D9: 'up' after a late node was
+added and the founder removed), else the catalogue."""
 import asyncio
 
 import pytest
@@ -47,8 +47,10 @@ def test_running_is_judged_against_the_expected_data():
 @pytest.mark.parametrize("states,answers,want", [
     ({**ALL}, None, {"up"}),
     ({**ALL, "cache": "not_created", "hub": "not_created"}, None, {"absent"}),
-    ({**ALL, "hub": "not_created"}, None, set()),                    # between: neither holds
-    ({**ALL}, {"cache": True, "hub": False}, set()),                # runs, does not answer
+    ({**ALL, "cache": "shutoff", "hub": "shutoff"}, {}, {"halted"}),     # a rig's shutdown
+    ({**ALL, "hub": "not_created"}, None, {"partial"}),
+    ({**ALL, "hub": "shutoff"}, None, {"partial"}),
+    ({**ALL}, {"cache": True, "hub": False}, {"partial"}),          # runs, does not answer
 ])
 def test_support(states, answers, want):
     r = reading(states, answers=answers)
