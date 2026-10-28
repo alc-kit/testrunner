@@ -137,14 +137,23 @@ replaces the stored state. After a step, an observer that contradicts the model 
 - **`CANNOT_TELL`**: it did not read a value. The variable keeps the value it had, an unknown
   stays unknown, and the output says which observer could not tell;
 - **`NONE_HOLDS`**: it looked, and the system is in none of the variable's values. The variable
-  becomes **unknown**: before the plan, the steps that require it are refused; after a step,
-  that step fails. It is journalled as `state_unknown` with `observed: "no value holds"`.
+  becomes **unknown**: a step that requires it errors before its body runs (the plan warns
+  about it); after a step, that step fails. It is journalled as `state_unknown` with
+  `observed: "no value holds"`.
 
 (`from testrunner import CANNOT_TELL, NONE_HOLDS`.) A derived observer (`observe: {order}`)
 answers `NONE_HOLDS` when every value does not hold, and `CANNOT_TELL` when one value cannot tell.
 Every message that makes a variable UNKNOWN — before the plan, after a step, in the journal's
 `state_unknown` — says **why**, value by value: each value's validator answer and its reason (a
 hand-written observer that answers `NONE_HOLDS` gives none, and the message says so).
+
+**Out of UNKNOWN** (user 2026-10-28): a step may run while a variable it claims (a line by it in
+the variable's machine) is unknown, and the look after it learns the value it left — "if a step
+touches a value into something different than UNKNOWN, it should be allowed". If the variable is
+**still unknown** after the step (no value holds, the observer could not tell, or nothing observes
+it), the step **fails**, with the reason, journalled as `unknown_not_left`. A step that claims
+nothing about the variable is not judged on it, and a `requires` on an unknown value still stops
+a step before it runs.
 
 **Validators** confirm a claimed value: `validate:` in the runner config, as a command, an
 `@validator` function, an extension's kind (`playbook:`), or as weak as "the step passed"
