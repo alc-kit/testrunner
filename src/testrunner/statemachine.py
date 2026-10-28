@@ -267,9 +267,7 @@ def parse_machine(where: str, var: str, values: list[str], text: Any) -> tuple[s
         for v in (frm, to):
             if v not in values:
                 raise ConfigError(f"{at}: {v!r} is not one of {values}")
-        if frm == to:
-            raise ConfigError(f"{at}: from and to are both {to!r}: a self-loop is not accepted yet (it arrives "
-                              f"with every outcome written out, WP step B3)")
+        # a self-loop is a claim of NO change, checked like any other (D8 c, WP B3)
         tr = Transition(var, by, on, frm, to)
         if tr in out:
             raise ConfigError(f"{at}: declared twice ({tr.text()})")
@@ -373,7 +371,9 @@ def check_agreement(reg: Any, states: dict[str, StateVar]) -> None:
             if t.frm == t.to:
                 continue                # {x: x} in a transition map: no change, nothing to agree on
             claimed[t] = act.source
-    declared = {t for sv in states.values() for t in sv.transitions}
+    # a self-loop (`up --> up : x [failed]`) declares "no change, checked": it is written once, in
+    # the machine, and needs no claim from the action (WP B3); every CHANGE agrees line for line
+    declared = {t for sv in states.values() for t in sv.transitions if t.frm != t.to}
 
     def where(var: str) -> str:
         sv = states.get(var)
@@ -419,6 +419,32 @@ def check_declarations(reg: Any, states: dict[str, StateVar]) -> None:
     if problems:
         raise ConfigError("the state machine is not fully declared (undefined behaviour is a failure):\n"
                           + "\n".join(problems))
+
+
+def check_complete(reg: Any, states: dict[str, StateVar]) -> None:
+    """D8 (c), WP step B3 (user 2026-10-28: "explicit self-loops are required"): in the `machine:`
+    form, for every value, EVERY outcome of an action that has a transition from that value has a
+    line — `failed`, `errored`, `aborted` and `skipped` included. A missing line refuses the plan,
+    and the message lists every missing line. (The YAML `transitions:` form keeps the closed world
+    during the migration window.)"""
+    problems = []
+    for sv in states.values():
+        if sv.form != "machine":
+            continue
+        have = {(t.frm, t.by, t.on) for t in sv.transitions}
+        for value in sv.values:
+            for by in sorted({t.by for t in sv.transitions if t.frm == value}):
+                act = reg.actions.get(by)
+                if act is None:
+                    continue                    # check_agreement reports an unknown action
+                for on in sorted(act.all_outcomes):
+                    if (value, by, on) not in have:
+                        problems.append(f"  {value} --> ? : {by} [{on}]")
+        if problems:
+            raise ConfigError(f"states.{sv.name}.machine: not every outcome is written out (D8 c) — every outcome "
+                              f"of an action that has a transition from a value needs its line (a self-loop, "
+                              f"`v --> v`, when it changes nothing; a failure's line is its expected end result):\n"
+                              + "\n".join(problems))
 
 
 def describe(states: dict[str, StateVar], reg: Any) -> list[dict]:

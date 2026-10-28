@@ -297,10 +297,11 @@ def validate_registry(reg: Registry, rc: RunnerConfig) -> None:
     for var in reg.observers:
         if var not in rc.states:
             raise ConfigError(f"observer for unknown state variable {var!r}")
-    from .statemachine import check_agreement, check_declarations
+    from .statemachine import check_agreement, check_complete, check_declarations
     from .validate import check_validators
     check_agreement(reg, rc.states)
     check_declarations(reg, rc.states)
+    check_complete(reg, rc.states)
     check_validators(reg, rc.states)
     from .statemachine import DerivedObserver
     for var, sv in rc.states.items():
