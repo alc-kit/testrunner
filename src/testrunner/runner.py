@@ -951,7 +951,7 @@ class Runner:
         ])
 
     async def _reobserve_after(self, run: RunContext, scope: Scope, ctx: StepContext, act: ActionSpec,
-                               outcome: Outcome) -> Outcome:
+                               outcome: Outcome, entry: dict[str, Any]) -> Outcome:
         """Reality after a step. A value the model does not know is learned. A value the
         observer reads DIFFERENTLY from the model fails the step (D4: either one is proof, and
         both must agree):
@@ -1008,6 +1008,21 @@ class Runner:
                              note="the observer contradicts the model")
             clashes.append(why)
             self.say(self.style.bad(why))
+        # Out of UNKNOWN (user 2026-10-28): a step may run while a variable it claims is UNKNOWN —
+        # "if a step touches a value into something different than UNKNOWN, it should be allowed" —
+        # and the look above learns the value it left. "If however the step fails to change the
+        # value OUT OF UNKNOWN, that should be considered a failure": still UNKNOWN after it (no
+        # value holds, the observer cannot tell, or nothing observes the variable) fails the step.
+        for var in self._claimed_vars(act):
+            if entry.get(var) is None and run.state.get(var) is None:
+                reason = self._none_holds_why.get(var) or (
+                    "no observer reads it" if var not in self.reg.observers else "the observer read no value")
+                why = (f"{sid} ({act.name}): {var} was UNKNOWN before this step, which claims {var}, and is still "
+                       f"UNKNOWN after it ({reason}) — a step run on an UNKNOWN value must bring it out of "
+                       f"UNKNOWN. Look at the step's log and the trace; `{program_name()} --plan` reads it again.")
+                log.warning("%s", why)
+                self.journal("unknown_not_left", step=sid, var=var, outcome=outcome.name, why=why)
+                clashes.append(why)
         if not clashes:
             return outcome
         detail = "\n".join(clashes)
@@ -1015,8 +1030,14 @@ class Runner:
             return Outcome(FAILED, detail)
         return Outcome(outcome.name, f"{outcome.detail}\n{detail}" if outcome.detail else detail)
 
+    def _claimed_vars(self, act: ActionSpec) -> list[str]:
+        """The variables this action claims: those whose machine has a line by it."""
+        by = claimer(act)
+        return sorted(var for var, sv in self.rc.states.items() if any(t.by == by for t in sv.transitions))
+
     async def _observe(self, var: str, scope: Scope) -> Any:
         fn = self.reg.observers[var]
+        self._none_holds_why.pop(var, None)     # a reason is this look's, never an earlier one's
         log.debug("observer %s: calling %s", var, _fn_name(fn))
         t = time.monotonic()
         if isinstance(fn, DerivedObserver):
@@ -1160,6 +1181,7 @@ class Runner:
         ended: str | None = None          # the outcome the ACTION ended on, before any claim was judged
         stop_why = ""                     # a failure's expected end result not found: the run stops here
         record_only = False               # a value was kept after a failure: observe, record, never apply
+        entry = dict(run.state)                 # the state the step starts from (out-of-UNKNOWN rule)
         ok, unknown = requires_holds(act.requires, run.state)
         log.info("%s: requires %s against state %s -> %s", sid, act.requires or "{}", run.state,
                  "unknown value(s) " + ", ".join(unknown) if ok and unknown else "holds" if ok else "DOES NOT HOLD")
@@ -1263,7 +1285,7 @@ class Runner:
             self.journal("observed_after_failure", step=sid, outcome=outcome.name, observed=reading,
                          could_not_read=sorted(blind))
         else:
-            outcome = await self._reobserve_after(run, run_scope, ctx, act, outcome)
+            outcome = await self._reobserve_after(run, run_scope, ctx, act, outcome, entry)
         if outcome.name == expect.outcome:
             wrong = {k: (v, run.state.get(k)) for k, v in expect.state.items() if run.state.get(k) != v}
             log.debug("%s: expected outcome %s reached; expect.state %s -> %s", sid, expect.outcome,
