@@ -852,7 +852,8 @@ there also loads the inner-step kinds and resolvers it registers for walk action
   - `{python: vms}`: `absent`, `running`, `halted` or `partial`. It is judged against the
     declared data `expected` when there is any, else the catalogue's cluster nodes. `running`
     means every expected machine runs **and** answers TCP/22; it never pings.
-  - `{python: support}`: `absent` or `up`, for the scenario's other machines.
+  - `{python: support}`: the same four values as `vms` (`absent`, `up`, `halted`, `partial`),
+    for the scenario's other machines.
 
   What runs *on* the machines is a system under test, and its probes live with it, e.g. Proxmox
   VE's in [proxmox-testrunner-ext](https://github.com/alc-kit/proxmox-testrunner-ext).

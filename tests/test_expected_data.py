@@ -3,7 +3,7 @@
 UML effect `/ <name> += <template>` or `-= <template>`, applied only when that line's claim is
 CONFIRMED by its validator. The value is stored with the state, journalled, a run fixture (`data`)
 and a template (`{data.<name>}`) — so a probe can judge "clustered" against the CURRENT expected
-nodes, not a fixed list (D9: "up after pve-val-4 was added and pve-val-1 removed")."""
+nodes, not a fixed list (D9: "up" after a late node was added and the founder removed)."""
 import json
 
 import pytest
