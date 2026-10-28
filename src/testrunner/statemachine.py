@@ -87,6 +87,8 @@ class StateVar:
     order: list[str] | None = None          # observe: {order}: an observer derived from validators
     model_only: bool = False                # nothing re-reads it: its value is the model's claim
     form: str = "transitions"               # how the runner config declares it: `transitions` or `machine`
+    # the UML effects on its lines (WP B4): (from, by, on, to) -> (data name, "+=" | "-=", template)
+    effects: dict[tuple[str, str, str, str], tuple[str, str, str]] = field(default_factory=dict)
 
     # the dict shape the rest of testrunner reads (rc.states[var]["values"], .get("initial"))
     def __getitem__(self, key: str) -> Any:
@@ -101,15 +103,15 @@ class StateVar:
         return [t for t in self.transitions if t.by == by]
 
 
-def parse_states(path: Path, data: Any) -> dict[str, StateVar]:
+def parse_states(path: Path, data: Any, declared_data: dict[str, Any] | None = None) -> dict[str, StateVar]:
     if data is None:
         return {}
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: states: want {{<variable>: {{values, ...}}}}")
-    return {str(var): _parse_var(path, str(var), spec) for var, spec in data.items()}
+    return {str(var): _parse_var(path, str(var), spec, declared_data or {}) for var, spec in data.items()}
 
 
-def _parse_var(path: Path, var: str, spec: Any) -> StateVar:
+def _parse_var(path: Path, var: str, spec: Any, declared_data: dict[str, Any] | None = None) -> StateVar:
     where = f"{path}: states.{var}"
     if isinstance(spec, list):
         spec = {"values": spec}
@@ -159,9 +161,9 @@ def _parse_var(path: Path, var: str, spec: Any) -> StateVar:
                 raise ConfigError(f"{where}: `machine` and `{other}` exclude each other — the machine block "
                                   f"declares {'its transitions' if other == 'transitions' else 'the initial value ([*] --> <value>)'}; "
                                   f"declare one form")
-        initial, transitions = parse_machine(where, var, values, spec["machine"])
+        initial, transitions, effects = parse_machine(where, var, values, spec["machine"], declared_data or {})
     else:
-        transitions = _parse_transitions(where, var, values, spec.get("transitions"))
+        transitions, effects = _parse_transitions(where, var, values, spec.get("transitions")), {}
     order = None
     if "observe" in spec:
         obs = spec["observe"]
@@ -179,7 +181,7 @@ def _parse_var(path: Path, var: str, spec: Any) -> StateVar:
     if model_only and order is not None:
         raise ConfigError(f"{where}: model_only and observe exclude each other — declare one")
     return StateVar(var, values, initial, criteria, validators, transitions, order, model_only,
-                    form="machine" if "machine" in spec else "transitions")
+                    form="machine" if "machine" in spec else "transitions", effects=effects)
 
 
 def _parse_transitions(where: str, var: str, values: list[str], raw: Any) -> list[Transition]:
@@ -216,7 +218,11 @@ def _parse_transitions(where: str, var: str, values: list[str], raw: Any) -> lis
 
 
 
-def parse_machine(where: str, var: str, values: list[str], text: Any) -> tuple[str | None, list[Transition]]:
+_EFFECT_RE = re.compile(r"^(.*\])\s*/\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|-=)\s*(\S.*)$")
+
+
+def parse_machine(where: str, var: str, values: list[str], text: Any, declared_data: dict[str, Any] | None = None
+                  ) -> tuple[str | None, list[Transition], dict[tuple[str, str, str, str], tuple[str, str, str]]]:
     """A `machine:` block (D8): Mermaid stateDiagram-v2 lines with UML `action [outcome]` labels.
     Returns (initial value or None, transitions). Every line outside the accepted subset is refused
     with its line number and the reason: explicit rather than implicit, undefined is a failure."""
@@ -226,6 +232,8 @@ def parse_machine(where: str, var: str, values: list[str], text: Any) -> tuple[s
                           f"`absent --> up : up [passed]`")
     initial: str | None = None
     out: list[Transition] = []
+    effects: dict[tuple[str, str, str, str], tuple[str, str, str]] = {}
+    declared_data = declared_data or {}
     seen_body = False
     for n, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
@@ -255,9 +263,18 @@ def parse_machine(where: str, var: str, values: list[str], text: Any) -> tuple[s
         if re.search(r"-->\s*\[\*\]", line):
             raise ConfigError(f"{at}: a transition to `[*]` (an end state) has no meaning here; a value is "
                               f"never left for 'nothing'")
-        if "/" in line.split(":", 1)[-1] and "[" in line and line.rsplit("]", 1)[-1].strip().startswith("/"):
-            raise ConfigError(f"{at}: a UML effect (`/ ...`) is not accepted yet; it is reserved for "
-                              f"updates of declared data (`/ expected += ...`, WP step B4)")
+        effect = None
+        if "[" in line and line.rsplit("]", 1)[-1].strip().startswith("/"):
+            # a UML effect: ONLY an update of declared data (D9 decision 2; WP B4)
+            em = _EFFECT_RE.match(line)
+            if not em:
+                raise ConfigError(f"{at}: a UML effect is `/ <data> += <template>` or `/ <data> -= <template>` "
+                                  f"(an update of declared data, nothing else)")
+            line, dname, op, tmpl = em.group(1), em.group(2), em.group(3), em.group(4).strip()
+            if dname not in declared_data:
+                raise ConfigError(f"{at}: `/ {dname} {op} ...` updates {dname!r}, which is not declared under data: "
+                                  f"(declared: {', '.join(sorted(declared_data)) or 'none'})")
+            effect = (dname, op, tmpl)
         m = _LINE_RE.match(line)
         if not m:
             raise ConfigError(f"{at}: not a machine line. Accepted: `[*] --> <value>`, "
@@ -271,8 +288,13 @@ def parse_machine(where: str, var: str, values: list[str], text: Any) -> tuple[s
         tr = Transition(var, by, on, frm, to)
         if tr in out:
             raise ConfigError(f"{at}: declared twice ({tr.text()})")
+        if effect is not None:
+            if on in FAILURE_OUTCOMES:
+                raise ConfigError(f"{at}: an effect on a failure line: data changes only when a claim is "
+                                  f"confirmed, and a failure claims nothing to apply it to")
+            effects[(frm, by, on, to)] = effect
         out.append(tr)
-    return initial, out
+    return initial, out, effects
 
 
 FAILURE_OUTCOMES = ("failed", "errored", "aborted")

@@ -124,6 +124,13 @@ class Store:
     def set_state(self, state: dict[str, Any]) -> None:
         self._state.put("state", state)
 
+    # declared data (extended state, WP B4): each a set of names, stored as a list
+    def get_data(self) -> dict[str, list[str]]:
+        return self._state.get("data", {}) or {}
+
+    def set_data(self, data: dict[str, list[str]]) -> None:
+        self._state.put("data", data)
+
     # the scenario
     def get_scenario(self) -> dict | None:
         try:
