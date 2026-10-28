@@ -152,7 +152,9 @@ def fixture(fn: Callable | None = None, *, name: str | None = None, scope: str =
 
 
 def observer(var: str) -> Callable:
-    """Export a function that reads the REAL value of a state variable."""
+    """Export a function that reads the REAL value of a state variable. It returns one of the
+    variable's values, or CANNOT_TELL when it did not read one: the variable then keeps the value it
+    had (an unknown stays unknown). Never a guess: whatever it returns is stored as reality."""
     def mark(fn: Callable) -> Callable:
         setattr(fn, MARK, ObserverMark(var=var))
         return fn

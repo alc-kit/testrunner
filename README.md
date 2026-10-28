@@ -126,7 +126,9 @@ def service_state(api): return api.status()
 They are asked before the plan is judged, when the run starts, and after every step, whatever
 its outcome, except after a `readonly` action, which only looks. At the start, what they read
 replaces the stored state. After a step, an observer that contradicts the model FAILS the step
-(see [State machine](#state-machine)).
+(see [State machine](#state-machine)). An observer that did not read a value returns
+`CANNOT_TELL` (`from testrunner import CANNOT_TELL`). The variable then keeps the value it had,
+an unknown stays unknown, and the output says which observer could not tell.
 
 **Validators** confirm a claimed value: `validate:` in the runner config, as a command, an
 `@validator` function, an extension's kind (`playbook:`), or as weak as "the step passed"
@@ -248,7 +250,10 @@ prints the whole of it as a table, which also goes in the journal and both repor
   - inside a walk, an observed change that the enclosing walk declares (from the value the
     variable had, to the value now seen) is that walk's claim, seen early. It is recorded, not
     failed;
-  - a value the model does not know (unknown) is learned from the observer.
+  - a value the model does not know (unknown) is learned from the observer, but only when the
+    observer READ a value. An observer that cannot tell which value it is returns `CANNOT_TELL`,
+    and the variable stays unknown. It must never answer a guess, such as a lower bound: a guess
+    would be stored as reality.
 - **Observers derived from validators**: `observe: {order: [clustered, installed, up, absent]}`
   asks each value's validator in that order, and the first that holds is the value. An earlier
   value that *cannot tell* stops the search: the observer cannot look, and the run warns and keeps

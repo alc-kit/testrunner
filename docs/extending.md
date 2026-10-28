@@ -46,7 +46,10 @@ The state model is the framework's spine. Everything else is judged against it.
 1. **A state variable is something an observer can READ.** `power: [off, on]` (the BMC knows),
    `rig: [absent, up, installed, clustered]` (vagrant and the cluster know). A variable nobody can
    read is a guess. Leave out `initial` when only the system knows the value: the runner then asks
-   the observer before it judges the plan.
+   the observer before it judges the plan. An observer that cannot tell which value it is (it
+   sees that something exists, but not how far along it is) returns `CANNOT_TELL`, never its best
+   guess. A guess is stored as reality; `CANNOT_TELL` keeps the value the model had, and an
+   unknown stays unknown.
 2. **Values form a lifecycle,** and actions move along it. Use a transition map,
    `produces: {rig: {up: installed}}`, when re-running a step on a system that is further along must
    not move it backwards.

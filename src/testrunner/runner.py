@@ -48,6 +48,11 @@ BUILTIN_RUN = {"run", "config", "store", "ui", "registry"}
 BUILTIN_STEP = {"step", "params", "proc", "state"}
 
 
+class ObserverCannotTell(FixtureError):
+    """An observer answered CANNOT_TELL: it did not read a value. The variable keeps the value it
+    had (an unknown stays unknown); never the observer's guess."""
+
+
 @dataclass
 class StepResult:
     id: str
@@ -271,7 +276,11 @@ class Runner:
         token = STEP.set("(observe)")
         try:
             for var in self.reg.observers:
-                out[var] = await self._observe(var, scope)
+                try:
+                    out[var] = await self._observe(var, scope)
+                except ObserverCannotTell as e:
+                    log.warning("before the plan: %s; %s stays %r (stored)", e, var, out.get(var))
+                    self.say(self.style.warn(f"{e}: {var} stays {out.get(var)!r} (stored)"))
         finally:
             await scope.close()
             STEP.reset(token)
@@ -537,6 +546,12 @@ class Runner:
                     continue
                 try:
                     seen = await self._observe(var, scope)
+                except ObserverCannotTell as e:
+                    keep = run.state.get(var)
+                    log.warning("%s: %s; %s stays %s", where, e, var, "UNKNOWN" if keep is None else repr(keep))
+                    self.say(self.style.warn(f"     {e}: {var} stays {'UNKNOWN' if keep is None else repr(keep)}"))
+                    blind.add(var)
+                    continue
                 except Exception as e:  # noqa: BLE001 — an observer that cannot look is reported, not fatal
                     log.warning("%s: could not observe %s (%s: %s); keeping the model's %r", where, var,
                                 type(e).__name__, e, run.state.get(var))
@@ -757,6 +772,8 @@ class Runner:
         else:
             value = await call(fn, await self.fixtures.kwargs_for(fn, scope))
         log.info("observer %s says %r (%.2fs)", var, value, time.monotonic() - t)
+        if value == CANNOT_TELL:
+            raise ObserverCannotTell(f"observer for {var} cannot tell (it read no value)")
         if value is not None and value not in self.rc.states[var]["values"]:
             raise FixtureError(f"observer for {var} returned {value!r}, not one of {self.rc.states[var]['values']}")
         return value

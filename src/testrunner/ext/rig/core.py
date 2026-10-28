@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable
 
-from ...api import ERRORED, FAILED, OutcomeError
+from ...api import CANNOT_TELL, ERRORED, FAILED, OutcomeError
 from ...proc import Proc
 from ..ansible import Ansible
 from ..console import ConsoleCapture
@@ -395,8 +395,12 @@ timeout = 30
     async def observe_rig(self, state: dict) -> str:
         """The `rig` state as reality says: no cluster node exists -> absent; otherwise the
         model's value stands (installed vs clustered cannot be told apart without a rig
-        round-trip), never below `up`. The harness key is ensured FIRST: the Vagrantfile
-        refuses to load without it, so on a fresh checkout `vagrant status` would fail."""
+        round-trip), never below `up`. When nodes exist and the model has NO value (unknown,
+        or never stored) this observer cannot tell which value it is, and says so: CANNOT_TELL
+        keeps the variable unknown (measured 2026-10-28: answering `up` there stored a false
+        value over a rig with PVE installed). The harness key is ensured FIRST: the
+        Vagrantfile refuses to load without it, so on a fresh checkout `vagrant status` would
+        fail."""
         self.ensure_bootstrap()
         p = Proc(self.root, self.logs)
         live = await self.live_nodes(self.machines(p))
@@ -405,7 +409,10 @@ timeout = 30
                      state.get("rig"))
             return "absent"
         have = state.get("rig")
-        seen = have if have not in (None, "absent") else "up"
+        if have is None:
+            log.info("observe rig: %s exist and the model has no value -> cannot tell which value", live)
+            return CANNOT_TELL
+        seen = have if have != "absent" else "up"
         log.info("observe rig: %s exist -> %s (%s)", live, seen,
                  "the model's value stands" if seen == have else f"the model said {have!r}, nodes exist: at least up")
         return seen
