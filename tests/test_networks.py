@@ -100,6 +100,9 @@ def test_the_rig_is_asked_with_the_live_definition_only_once_the_network_runs():
     ((1, "error: failed to connect to the hypervisor\nerror: access denied by policy\n"), (0, XML)),
     ((0, "Navn  Tilstand  Autostart  Vedvarende\n---\n n  aktiv  ja  ja\n"), (0, XML)),   # a translated table
     ((0, HEAD + " n   active   maybe   yes\n"), (0, XML)),                               # a row it cannot read
+    # a virsh that added a column: read from the right, "n active yes yes yes" would make a network
+    # "n active" and `n` absent — only the header check sees it
+    ((0, " Name  State  Autostart  Persistent  Extra\n" + "-" * 40 + "\n n  active  yes  yes  yes\n"), (0, XML)),
     ((0, table(UP)), (1, "error: x\n")),                                                 # the definition unreadable
 ])
 def test_virsh_that_does_not_answer_cannot_tell(listing, xml):
