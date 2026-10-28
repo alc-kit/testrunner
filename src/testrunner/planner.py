@@ -817,6 +817,14 @@ def _effect(spec: dict, state: dict) -> dict:
     return out
 
 
+def mode_branches(effect: dict) -> list[dict]:
+    """An effect whose value for a variable is a LIST names a failure's modes (WP B1c): one
+    branch per mode (the product over variables). An effect without lists is one branch."""
+    keys = list(effect)
+    opts = [effect[k] if isinstance(effect[k], list) else [effect[k]] for k in keys]
+    return [dict(zip(keys, combo)) for combo in itertools.product(*opts)]
+
+
 def walk_of(act: ActionSpec, reg: Registry | None) -> Any:
     """The WalkSpec an action runs: its own (a walk), or its target's (an inner step that
     calls a walk); None otherwise."""
@@ -881,7 +889,8 @@ def matrix(prog: Program, reg: Registry, prefix: str = "", depth: int = 0,
         rules = prog.rules.get(s.id)
         for n, o in enumerate([PASSED, *named, "failed", "errored", "aborted"]):
             spec = act.produces if o == PASSED else act.produces_on.get(o, {})
-            after = ", ".join(f"{k}: " + (" ".join(f"{a}->{b}" for a, b in v.items()) if isinstance(v, dict) else str(v))
+            after = ", ".join(f"{k}: " + (" ".join(f"{a}->{'|'.join(b) if isinstance(b, list) else b}"
+                                                   for a, b in v.items()) if isinstance(v, dict) else str(v))
                               for k, v in spec.items())
             if not after:
                 # a failure with no declared expected end result keeps the value from before (user
@@ -1108,23 +1117,37 @@ def simulate(rc: RunnerConfig, reg: Registry, prog: Program, state0: dict,
         rules = prog.rules.get(step.id) or []
         outcomes = {exp.outcome} | set(prog.reactions.get(step.id, {})) | {o for r in rules for o in r.outcomes or []}
         for outcome in sorted(outcomes):
-            new = {**state, **produced(act, outcome, state, reg, compose=True)}
-            if outcome == exp.outcome:
-                for var, val in exp.state.items():
-                    if new.get(var) is not None and new[var] != val:
-                        errs[f"{step.id}: expect.state says {var}={val!r}, but ending {outcome} "
-                             f"leaves {var}={new[var]!r}"] = None
-                    new[var] = val
-            # the model's own end state, and every state a rule for this outcome names: an
-            # observer may report it, so its branch is judged too (goto form after a join that
-            # left the rig only installed)
-            ends = [new] + [{**new, **dict(combo)} for r in rules
-                            if r.state and (r.outcomes is None or outcome in r.outcomes)
-                            for combo in itertools.product(*[[(k, x) for x in (v if isinstance(v, list) else [v])]
-                                                             for k, v in r.state.items()])]
-            for end in ends:
-                t = walker.next(cur, outcome, end)
-                stack.append((t.cursor, end, visits, trail))
+            # a failure with several declared end results (its modes) branches once per mode: a plan
+            # with no rule for a mode is caught here, before anything runs (WP B1c)
+            branches = mode_branches(produced(act, outcome, state, reg, compose=True))
+            for effect in branches:
+                new = {**state, **effect}
+                if len(branches) > 1:
+                    # a declared failure mode must be ROUTED by a rule of this step (`then: stop` is a
+                    # rule): the plan states what happens on each, or it is refused (WP B1c)
+                    routed = any((r.outcomes is None or outcome in r.outcomes) and all(
+                        new.get(k) in (w if isinstance(w, list) else [w]) for k, w in (r.state or {}).items())
+                        for r in rules)
+                    if not routed:
+                        modes = ", ".join(f"{k}={w}" for k, w in effect.items())
+                        errs[f"{step.id}: ending {outcome} in failure mode {modes}, which no rule of this step "
+                             f"routes (declare one per mode; `then: stop` if the test should end there)"] = None
+                if outcome == exp.outcome:
+                    for var, val in exp.state.items():
+                        if new.get(var) is not None and new[var] != val:
+                            errs[f"{step.id}: expect.state says {var}={val!r}, but ending {outcome} "
+                                 f"leaves {var}={new[var]!r}"] = None
+                        new[var] = val
+                # the model's own end state, and every state a rule for this outcome names: an
+                # observer may report it, so its branch is judged too (goto form after a join that
+                # left the rig only installed)
+                ends = [new] + [{**new, **dict(combo)} for r in rules
+                                if r.state and (r.outcomes is None or outcome in r.outcomes)
+                                for combo in itertools.product(*[[(k, x) for x in (v if isinstance(v, list) else [v])]
+                                                                 for k, v in r.state.items()])]
+                for end in ends:
+                    t = walker.next(cur, outcome, end)
+                    stack.append((t.cursor, end, visits, trail))
     v.errors = list(errs)
     v.warnings = list(warns)
     return v

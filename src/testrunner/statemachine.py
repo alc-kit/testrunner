@@ -277,21 +277,25 @@ def parse_machine(where: str, var: str, values: list[str], text: Any) -> tuple[s
     return initial, out
 
 
+FAILURE_OUTCOMES = ("failed", "errored", "aborted")
+
+
 def _one_end_result(where: str, transitions: list[Transition]) -> None:
-    """One value, one action, one outcome: ONE declared end result. Two would leave the runner to
-    pick one (it used to take the first), which is undefined. Several failure modes for one
-    outcome, told apart by their validators and routed by the plan, arrive with WP step B1c."""
+    """One value, one action, one outcome: ONE declared end result — except for a failure, whose
+    several end results are its FAILURE MODES (WP step B1c, user 2026-10-28): the validators tell
+    them apart after the failure, and the plan routes each. Several targets on any other outcome
+    would leave the runner to pick one, which is undefined."""
     seen: dict[tuple[str, str, str], set[str]] = {}
     for t in transitions:
         seen.setdefault((t.frm, t.by, t.on), set()).add(t.to)
     for (frm, by, on), tos in seen.items():
         also = seen.get((ANY, by, on), set()) if frm != ANY else set()
         targets = tos | also
-        if len(targets) > 1:
+        if len(targets) > 1 and on not in FAILURE_OUTCOMES:
             raise ConfigError(f"{where}: {by} [{on}] from {frm!r} has {len(targets)} end results "
                               f"({', '.join(sorted(targets))}){' (with the * line)' if also else ''}: one value, one "
-                              f"action and one outcome may declare ONE. Several failure modes told apart by their "
-                              f"validators are not supported yet (WP step B1c).")
+                              f"action and one outcome may declare ONE. Several end results are only for a failure "
+                              f"({', '.join(FAILURE_OUTCOMES)}): its failure modes.")
 
 
 def state_event_table(sv: "StateVar") -> tuple[list[str], dict[str, dict[str, list[str]]]]:
@@ -350,7 +354,8 @@ def claims_of(act: Any) -> set[Transition]:
         for var, val in spec.items():
             if isinstance(val, dict):
                 for frm, to in val.items():
-                    out.add(Transition(var, act.name, outcome, str(frm), str(to)))
+                    for t in (to if isinstance(to, list) else [to]):     # a list: the failure modes
+                        out.add(Transition(var, act.name, outcome, str(frm), str(t)))
             else:
                 out.add(Transition(var, act.name, outcome, ANY, str(val)))
     return out

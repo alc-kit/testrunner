@@ -253,13 +253,29 @@ def _register_shell(reg: Registry, name: str, spec: dict, rc: RunnerConfig) -> N
         shell={**spec, "exit_codes": exit_codes}, source=where)
 
 
+FAILURE_OUTCOMES = ("failed", "errored", "aborted")
+
+
 def _check_values(rc: RunnerConfig, where: str, mapping: dict, allow_list: bool,
-                  allow_map: bool = False) -> None:
+                  allow_map: bool = False, allow_modes: bool = False) -> None:
     for var, val in mapping.items():
         if var not in rc.states:
             raise ConfigError(f"{where}: unknown state variable {var!r} (declared: {', '.join(rc.states) or 'none'})")
         if allow_map and isinstance(val, dict):     # a transition map {current: next}
-            vals = [*val.keys(), *val.values()]
+            vals = list(val.keys())
+            for frm, to in val.items():
+                if isinstance(to, list):
+                    # several end results: the failure modes, told apart by their validators (WP B1c)
+                    if not allow_modes:
+                        raise ConfigError(f"{where}: {var}: {frm!r} -> {to!r}: a list of end results (failure "
+                                          f"modes) is only for {', '.join(FAILURE_OUTCOMES)}; a "
+                                          f"claim on any other outcome has ONE end result")
+                    if len(to) < 2 or len(set(map(str, to))) != len(to):
+                        raise ConfigError(f"{where}: {var}: {frm!r} -> {to!r}: a list of failure modes names at "
+                                          f"least two different values (one is a plain value)")
+                    vals += to
+                else:
+                    vals.append(to)
         else:
             vals = val if (allow_list and isinstance(val, list)) else [val]
         for v in vals:
@@ -276,7 +292,8 @@ def validate_registry(reg: Registry, rc: RunnerConfig) -> None:
         for outcome, mapping in a.produces_on.items():
             if outcome not in a.all_outcomes:
                 raise ConfigError(f"{a.source}: produces_on names outcome {outcome!r}, which it does not declare")
-            _check_values(rc, f"{a.source} produces_on.{outcome}", mapping, allow_list=False, allow_map=True)
+            _check_values(rc, f"{a.source} produces_on.{outcome}", mapping, allow_list=False, allow_map=True,
+                          allow_modes=outcome in FAILURE_OUTCOMES)
     for var in reg.observers:
         if var not in rc.states:
             raise ConfigError(f"observer for unknown state variable {var!r}")

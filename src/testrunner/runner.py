@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TextIO
 
-from .api import (ABORTED, BUILTIN_OUTCOMES, CANNOT_TELL, NONE_HOLDS, ERRORED, FAILED, PASSED, SKIPPED, Outcome,
+from .api import (ABORTED, BUILTIN_OUTCOMES, CANNOT_TELL, DOES_NOT_HOLD, NONE_HOLDS, ERRORED, FAILED, PASSED, SKIPPED, Outcome,
                   OutcomeError)
 from .config import RunConfig, RunnerConfig, deep_merge, lookup, program_name
 from .discovery import ActionSpec, Registry
@@ -687,12 +687,19 @@ class Runner:
                     self.journal("state_kept", step=ctx.id, var=var, value=cur, outcome=outcome.name,
                                  why="no expected end result is declared for this failure; the value from before is kept")
                     continue
-                to, = lines                      # one end result per (value, action, outcome): enforced at load
+                # one end result, or several: the failure MODES, told apart by their validators, all
+                # asked in one look (one reading). Exactly one must hold (WP B1c, user 2026-10-28).
                 look = Scope("look", {}, parent=scope)
                 looks.append(look)
-                v = await self._validate(sv, Claim(var, to, CLAIMED, ctx.id, outcome.name, True, inner,
-                                                   f"{ctx.file_id}.validate.{var}.{to}.log"), look, proc, ctx, act)
-                if v.holds:
+                verdicts = [await self._validate(sv, Claim(var, to, CLAIMED, ctx.id, outcome.name, True, inner,
+                                                           f"{ctx.file_id}.validate.{var}.{to}.log"),
+                                                 look, proc, ctx, act) for to in lines]
+                holding = [x for x in verdicts if x.holds]
+                if len(holding) == 1 and all(x.holds or x.answer == DOES_NOT_HOLD for x in verdicts):
+                    v, to = holding[0], holding[0].value
+                else:
+                    v, to = None, None
+                if v is not None:
                     run.state[var] = to
                     if v.kind not in NOT_LOOKING:
                         ctx.looked.add(var)
@@ -701,18 +708,28 @@ class Runner:
                                      verdicts=[v.record()], note="the failure's declared end result")
                     else:
                         self._state_event("state_changed", ctx, var, cur, to, by, outcome.name, v,
-                                          note="the failure's declared end result")
+                                          note=("the failure's declared end result" if len(lines) == 1 else
+                                                f"failure mode {to} (of {', '.join(lines)})"))
                     continue
                 self._kept.add(var)
                 kept = True
-                why = (f"{ctx.id} ({act.name}) ended {outcome.name}, and its expected end result {var}={to!r} was "
-                       f"NOT found ({v.answer}: {v.why}) — the test fails here, whatever the plan's rules say. "
-                       f"{var} keeps {cur!r} (the value from before); what the observers read is recorded "
-                       f"(observed_after_failure).")
+                answers = "; ".join(f"{x.value}: {x.answer} ({x.why})" for x in verdicts)
+                if len(lines) == 1:
+                    found = f"its expected end result {var}={lines[0]!r} was NOT found ({answers})"
+                elif len(holding) > 1:
+                    found = (f"its failure could not be classified: {len(holding)} of its modes hold at once "
+                             f"({', '.join(x.value for x in holding)}; {answers})")
+                elif not holding:
+                    found = f"it matched NONE of its failure modes ({answers})"
+                else:
+                    found = f"its failure could not be classified: a mode cannot tell ({answers})"
+                why = (f"{ctx.id} ({act.name}) ended {outcome.name}, and {found} — the test fails here, whatever "
+                       f"the plan's rules say. {var} keeps {cur!r} (the value from before); what the observers "
+                       f"read is recorded (observed_after_failure).")
                 log.warning("%s", why)
                 self.say(self.style.bad(why))
                 self.journal("state_kept", step=ctx.id, var=var, value=cur, outcome=outcome.name,
-                             verdicts=[v.record()], why=why)
+                             verdicts=[x.record() for x in verdicts], why=why)
                 stops.append(why)
         finally:
             for look in looks:
@@ -1140,6 +1157,12 @@ class Runner:
             # not settled: a dry run (the model carries the walk), or a step that never ran
             before = dict(run.state)
             changed = produced(act, outcome.name, run.state) if outcome.name not in (ERRORED, ABORTED) else {}
+            for var, val in list(changed.items()):
+                if isinstance(val, list):
+                    # several failure modes, and nothing looked: the model cannot say which (WP B1c)
+                    log.info("%s: %s ended %s with failure modes %s and nothing looked (%s) -> %s is unknown", sid,
+                             act.name, outcome.name, val, "dry run" if self.dry else "not settled", var)
+                    changed[var] = None
             run.state.update(changed)
             log.info("%s: outcome %s produces %s (%s) -> state %s", sid, outcome.name, changed or "nothing",
                      "errored/aborted produce nothing" if outcome.name in (ERRORED, ABORTED)

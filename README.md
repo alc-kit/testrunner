@@ -279,6 +279,18 @@ prints the whole of it as a table, which also goes in the journal and both repor
     - **no transition declared for that outcome**: the value from before is kept, the observers'
       reading is recorded the same way, and the rules route as before. If the rig no longer
       matches the kept value, the next step's observer sees the difference and fails that step.
+    - **Several end results declared for one value and failure outcome are its FAILURE MODES**
+      (`absent --> quorum : make [failed]` and `absent --> split : make [failed]`; on the
+      action, `produces_on={"failed": {"sys": {"absent": ["quorum", "split"]}}}`). Every mode's
+      validator is asked from one reading:
+      - exactly one holds: that is the mode, and the variable moves there;
+      - none holds, several hold, or one cannot tell: the failure cannot be classified, and the
+        test fails as above.
+
+      The plan's rules are the decision matrix (`when: {outcome: failed, state: {sys: quorum}},
+      then: [fix-quorum]`). **Every mode must be routed by a rule of that step**, `then: stop`
+      included, or the plan is refused before anything runs. A list of end results is only for
+      `failed`, `errored` and `aborted`; any other outcome has one.
 
     The scenario is never released on what nobody looked at: after a failure the release look
     reads reality into a copy (a kept value stays), and a kept value that no observer can read
@@ -443,7 +455,8 @@ edit:
       outcome: [failed, errored]
       detail: "regex"            #   on the outcome's detail
       output: "Could not get lock|Temporary failure resolving"   # what the attempt printed
-      state: {rig: up}           #   the OBSERVED state after the attempt
+      state: {rig: up}           #   the OBSERVED state after the attempt; a failure's classified
+                                 #   mode is that state: {rig: [quorum]} retries listed modes only
       probe: apt-reachable       #   a read-only action, run now; must pass
     unless:                      # ANY match: no retry (same keys)
       output: "No space left on device"
