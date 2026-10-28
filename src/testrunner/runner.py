@@ -199,6 +199,10 @@ class Runner:
         # kinds, observers); describe the commands the rest would run; lock, claim, store nothing
         self.dry = dry
         self.dry_outcomes = dict(dry_outcomes or {})   # full step id -> the outcome to assume
+        # the look taken before the plan was judged (observe()); the run start reuses it instead of
+        # looking again, but only while the state it started from is still the state the run
+        # starts from
+        self._pre_look: dict | None = None
         self.dry_not_run: list[str] = []               # python actions a dry run did not run
         self.dry_unrendered: list[str] = []            # references a dry run could not resolve
         self.show_commands = show_commands         # --show-commands: each command, copy-pasteable
@@ -273,17 +277,23 @@ class Runner:
         scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui,
                               "registry": self.reg})
         out = dict(state)
+        read: list[str] = []
         token = STEP.set("(observe)")
+        t = time.monotonic()
         try:
             for var in self.reg.observers:
                 try:
                     out[var] = await self._observe(var, scope)
+                    read.append(var)
                 except ObserverCannotTell as e:
                     log.warning("before the plan: %s; %s stays %r (stored)", e, var, out.get(var))
                     self.say(self.style.warn(f"{e}: {var} stays {out.get(var)!r} (stored)"))
         finally:
             await scope.close()
             STEP.reset(token)
+        self._pre_look = {"from": dict(state), "read": {v: out[v] for v in read},
+                          "could_not_tell": [v for v in self.reg.observers if v not in read],
+                          "seconds": round(time.monotonic() - t, 2), "at": time.time()}
         return out
 
     # ── the run ──
@@ -331,14 +341,34 @@ class Runner:
         run.state = state
         result = RunResult(True, run.results)
         interrupted = False
+        # One look at the start, not two: the look taken before the plan was judged is reused
+        # when the state it started from is the state this run starts from (the writer lock
+        # never waits, so nothing ran in between unless the store changed). Otherwise, look again.
+        pre = self._pre_look
+        reuse = pre is not None and pre["from"] == state
+        if pre is not None and not reuse:
+            log.info("the store changed since the look before the plan (%s, now %s): looking again",
+                     pre["from"], state)
         self.journal("run_start", config=str(self.run_config.file or ""), source=program.source,
                      matrix=matrix(program, self.reg), machine=describe(rc.states, self.reg),
                                   steps=[s.id for s in program.main], state=state, pid=os.getpid(),
-                     readonly=self.readonly, **({"forwarded": list(self.forwarded)} if self.forwarded else {}))
+                     readonly=self.readonly, **({"forwarded": list(self.forwarded)} if self.forwarded else {}),
+                     **({"observed_before_plan": {k: pre[k] for k in ("read", "could_not_tell", "seconds")}}
+                        if reuse else {}))
         try:
-            # an observer that cannot look is a warning here (as in the CLI's pre-plan look),
-            # never a crash: the run then starts from the stored state for that variable
-            await self._reobserve(run, run_scope, "(observe)")
+            if reuse:
+                for var, seen in pre["read"].items():
+                    if seen != run.state.get(var):
+                        log.info("(observe): %s=%r, read before the plan (%.1fs ago); the model said %r",
+                                 var, seen, time.time() - pre["at"], run.state.get(var))
+                    run.state[var] = seen
+                log.info("run start: the look before the plan is reused (%s read in %.2fs%s); not looking again",
+                         pre["read"] or "nothing", pre["seconds"],
+                         f"; could not tell: {pre['could_not_tell']}" if pre["could_not_tell"] else "")
+            else:
+                # an observer that cannot look is a warning here (as in the CLI's pre-plan look),
+                # never a crash: the run then starts from the stored state for that variable
+                await self._reobserve(run, run_scope, "(observe)")
             try:
                 await self.hook("run_start", run=run)
             except OutcomeError as e:
@@ -582,67 +612,74 @@ class Runner:
         by = claimer(act)
         inner = {r.id[len(ctx.id) + 1:]: r.outcome for r in results if r.id.startswith(ctx.id + "/")}
         failures: list[str] = []
-        for var, sv in self.rc.states.items():
-            cur = run.state.get(var)
-            here = [t for t in sv.transitions_by(by) if t.frm in (cur, ANY)]
-            if not here or cur is None and all(t.frm != ANY for t in here):
-                continue
-            claimed = {t.to for t in here if t.on == outcome.name}
-            log.info("%s: %s=%s; %s declares %s; outcome %s %s", ctx.id, var, cur, by,
-                     [t.text() for t in here], outcome.name,
-                     f"claims {var}={next(iter(claimed))}" if claimed else "claims no change")
-            asked: list[Verdict] = []
-
-            async def ask(value: str, role: str) -> Verdict:
-                v = await self._validate(sv, Claim(var, value, role, ctx.id, outcome.name, bool(claimed), inner,
-                                                f"{ctx.file_id}.validate.{var}.{value}.log"), scope, proc, ctx, act)
-                asked.append(v)
-                return v
-
-            if claimed:
-                to = next(iter(claimed))
-                v = await ask(to, CLAIMED)
-                if v.holds:
-                    run.state[var] = to
-                    if v.kind not in NOT_LOOKING:
-                        ctx.looked.add(var)
-                    if to == cur:              # a claim of the value it already had: confirmed, not a change
-                        self.journal("state_checked", step=ctx.id, var=var, value=cur, outcome=outcome.name,
-                                     verdicts=[v.record()])
-                    else:
-                        self._state_event("state_changed", ctx, var, cur, to, by, outcome.name, v)
+        looks: list[Scope] = []         # one look per variable: its validators share one reading
+        try:
+            for var, sv in self.rc.states.items():
+                look = Scope("look", {}, parent=scope)
+                looks.append(look)
+                cur = run.state.get(var)
+                here = [t for t in sv.transitions_by(by) if t.frm in (cur, ANY)]
+                if not here or cur is None and all(t.frm != ANY for t in here):
                     continue
-                log.warning("%s: the claim %s=%s %s: %s", ctx.id, var, to, v.answer, v.why)
-            # no claim on this outcome, or a claim that did not hold: what did it really leave?
-            candidates = ([cur] if cur is not None else []) + sorted({t.to for t in here} - {cur})
-            seen = {}
-            for value in candidates:
-                prior = next((x for x in asked if x.value == value and x.role == CLAIMED), None)
-                seen[value] = prior or await ask(value, BEFORE if value == cur else CLAIMED)
-            holding = [value for value, v in seen.items() if v.holds]
-            unsure = [v for v in seen.values() if v.answer == CANNOT_TELL]
-            if len(holding) == 1 and not unsure:
-                value = holding[0]
-                if seen[value].kind not in NOT_LOOKING:
-                    ctx.looked.add(var)
-                if value == cur and not claimed:
-                    log.info("%s: %s stays %s (checked: %s)", ctx.id, var, cur, "; ".join(v.text() for v in asked))
-                    self.journal("state_checked", step=ctx.id, var=var, value=cur, outcome=outcome.name,
-                                 verdicts=[v.record() for v in asked])
-                    continue
-                if value != cur:
-                    run.state[var] = value
-                    self._state_event("state_changed", ctx, var, cur, value, by, outcome.name, seen[value],
-                                      note=f"reached although the step ended {outcome.name}"
-                                      + (" and its claim did not hold" if claimed else ""))
+                claimed = {t.to for t in here if t.on == outcome.name}
+                log.info("%s: %s=%s; %s declares %s; outcome %s %s", ctx.id, var, cur, by,
+                         [t.text() for t in here], outcome.name,
+                         f"claims {var}={next(iter(claimed))}" if claimed else "claims no change")
+                asked: list[Verdict] = []
+
+                async def ask(value: str, role: str) -> Verdict:
+                    v = await self._validate(sv, Claim(var, value, role, ctx.id, outcome.name, bool(claimed), inner,
+                                                    f"{ctx.file_id}.validate.{var}.{value}.log"), look, proc, ctx, act)
+                    asked.append(v)
+                    return v
+
                 if claimed:
-                    failures.append(self._claim_text(ctx, act, outcome, var, cur, next(iter(claimed)), value, asked))
-                continue
-            run.state[var] = None
-            why = self._unknown_text(ctx, act, outcome, var, cur, claimed, holding, asked)
-            failures.append(why)
-            self.journal("state_unknown", step=ctx.id, var=var, was=cur, outcome=outcome.name,
-                         verdicts=[v.record() for v in asked], why=why)
+                    to = next(iter(claimed))
+                    v = await ask(to, CLAIMED)
+                    if v.holds:
+                        run.state[var] = to
+                        if v.kind not in NOT_LOOKING:
+                            ctx.looked.add(var)
+                        if to == cur:              # a claim of the value it already had: confirmed, not a change
+                            self.journal("state_checked", step=ctx.id, var=var, value=cur, outcome=outcome.name,
+                                         verdicts=[v.record()])
+                        else:
+                            self._state_event("state_changed", ctx, var, cur, to, by, outcome.name, v)
+                        continue
+                    log.warning("%s: the claim %s=%s %s: %s", ctx.id, var, to, v.answer, v.why)
+                # no claim on this outcome, or a claim that did not hold: what did it really leave?
+                candidates = ([cur] if cur is not None else []) + sorted({t.to for t in here} - {cur})
+                seen = {}
+                for value in candidates:
+                    prior = next((x for x in asked if x.value == value and x.role == CLAIMED), None)
+                    seen[value] = prior or await ask(value, BEFORE if value == cur else CLAIMED)
+                holding = [value for value, v in seen.items() if v.holds]
+                unsure = [v for v in seen.values() if v.answer == CANNOT_TELL]
+                if len(holding) == 1 and not unsure:
+                    value = holding[0]
+                    if seen[value].kind not in NOT_LOOKING:
+                        ctx.looked.add(var)
+                    if value == cur and not claimed:
+                        log.info("%s: %s stays %s (checked: %s)", ctx.id, var, cur, "; ".join(v.text() for v in asked))
+                        self.journal("state_checked", step=ctx.id, var=var, value=cur, outcome=outcome.name,
+                                     verdicts=[v.record() for v in asked])
+                        continue
+                    if value != cur:
+                        run.state[var] = value
+                        self._state_event("state_changed", ctx, var, cur, value, by, outcome.name, seen[value],
+                                          note=f"reached although the step ended {outcome.name}"
+                                          + (" and its claim did not hold" if claimed else ""))
+                    if claimed:
+                        failures.append(self._claim_text(ctx, act, outcome, var, cur, next(iter(claimed)), value, asked))
+                    continue
+                run.state[var] = None
+                why = self._unknown_text(ctx, act, outcome, var, cur, claimed, holding, asked)
+                failures.append(why)
+                self.journal("state_unknown", step=ctx.id, var=var, was=cur, outcome=outcome.name,
+                             verdicts=[v.record() for v in asked], why=why)
+        finally:
+            for look in looks:
+                await look.close()
         if failures:
             for f in failures:
                 self.say(self.style.bad(f))
@@ -787,11 +824,12 @@ class Runner:
         params = ((data if found else self.run_config.data) or {}).get(self.rc.params_section) or {}
         ctx = _ObserveCtx(f"(observe {sv.name})")
         self._frames.append(WalkFrame(_NoWalk(f"observe {sv.name}"), params, ctx))
+        look = Scope("look", {}, parent=scope)      # one look: every value in order, one reading
         try:
             asked = []
             for value in sv.order:
                 v = await judge(self.reg, sv, Claim(sv.name, value, OBSERVE, log=f"observe.{sv.name}.{value}.log"),
-                                fixtures=self.fixtures, scope=scope, proc=proc,
+                                fixtures=self.fixtures, scope=look, proc=proc,
                                 resolve=self._resolver(scope, ctx), root=self.rc.root)
                 asked.append(v)
                 if v.holds:
@@ -799,6 +837,7 @@ class Runner:
                 if v.answer == CANNOT_TELL:
                     break
         finally:
+            await look.close()
             self._frames.pop()
         raise FixtureError(f"cannot read {sv.name} in order {sv.order}: "
                            + "; ".join(v.text() for v in asked)
