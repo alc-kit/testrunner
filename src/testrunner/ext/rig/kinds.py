@@ -30,6 +30,7 @@ import inspect
 import logging
 
 from ...api import ERRORED, FAILED, OutcomeError, resolver, step_kind
+from .networks import libvirt_net_validator  # noqa: F401  (a validator kind: discovered here)
 
 log = logging.getLogger(__name__)
 

@@ -301,6 +301,15 @@ class Rig:
         from .regions import answers
         return await answers(ip, port, timeout)
 
+    async def network_correct(self, name: str, live_xml: str) -> tuple[bool | None, str]:
+        """Has the libvirt network `name` the parameters this rig needs (its live definition,
+        `virsh net-dumpxml`)? The `libvirt_net` validator asks this once the network is defined,
+        persistent, active and autostart (ext/rig/networks.py). (True, why) / (False, why), or
+        (None, why) for "cannot tell". There is no default: a rig that declares networks says
+        what a correct one is (explicit rather than implicit; user 2026-10-28)."""
+        return None, (f"rig {self.settings.name!r} does not say what a correct {name} is "
+                      f"(override Rig.network_correct)")
+
     async def live_nodes(self, vg: MachineProvider) -> list[str]:
         """The rig's cluster nodes that EXIST right now (asked of vagrant, in catalogue order).
         Every catalogue node is asked, not only the scenario's: a node another scenario left
