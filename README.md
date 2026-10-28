@@ -142,6 +142,9 @@ replaces the stored state. After a step, an observer that contradicts the model 
 
 (`from testrunner import CANNOT_TELL, NONE_HOLDS`.) A derived observer (`observe: {order}`)
 answers `NONE_HOLDS` when every value does not hold, and `CANNOT_TELL` when one value cannot tell.
+Every message that makes a variable UNKNOWN — before the plan, after a step, in the journal's
+`state_unknown` — says **why**, value by value: each value's validator answer and its reason (a
+hand-written observer that answers `NONE_HOLDS` gives none, and the message says so).
 
 **Validators** confirm a claimed value: `validate:` in the runner config, as a command, an
 `@validator` function, an extension's kind (`playbook:`), or as weak as "the step passed"

@@ -233,6 +233,9 @@ class Runner:
         self._current_task: asyncio.Task | None = None
         self._aborted = False
         self._frames: list[WalkFrame] = []      # the walk actions being walked, innermost last
+        # why an observer found no value holding, by variable: every message that makes a variable
+        # UNKNOWN says it — the operator must see why (a breached network, say), not only that
+        self._none_holds_why: dict[str, str] = {}
         # steps journalled as started and not yet ended (a walk's step and its inner step):
         # an interrupt ends each of them, innermost first, instead of leaving them open
         self._open: list[tuple[str, str, float, str]] = []      # (step, action, started, attempt)
@@ -309,7 +312,7 @@ class Runner:
                         log.warning("before the plan: observer for %s: no value holds; %s is UNKNOWN (the store "
                                     "said %r)", var, var, out.get(var))
                         self.say(self.style.warn(f"observer for {var}: no value of {var} holds — {var} is UNKNOWN "
-                                                 f"(the store said {out.get(var)!r})"))
+                                                 f"(the store said {out.get(var)!r}): {self._none_holds_why.get(var)}"))
                         seen = None
                     out[var] = seen
                     read.append(var)
@@ -648,8 +651,8 @@ class Runner:
                 if seen == NONE_HOLDS:
                     was = state.get(var)
                     why = (f"{where}: the observer for {var} looked, and no value of {var} holds "
-                           f"(the model said {was!r}) — {var} is UNKNOWN: no step that requires it will run, "
-                           f"and the scenario is not released")
+                           f"(the model said {was!r}: {self._none_holds_why.get(var)}) — {var} is UNKNOWN: no step "
+                           f"that requires it will run, and the scenario is not released")
                     log.warning("%s", why)
                     if was is not None and record:
                         self.say(self.style.bad(f"     {why}"))
@@ -969,7 +972,7 @@ class Runner:
             if seen is None:
                 # the observer looked and no value holds (journalled as state_unknown by _reobserve)
                 why = (f"{sid} ({act.name}): after the step the observer for {var} finds no value of {var} "
-                       f"holding (the model said {was!r}) — {var} is now UNKNOWN (no step that requires it "
+                       f"holding (the model said {was!r}: {self._none_holds_why.get(var)}) — {var} is now UNKNOWN (no step that requires it "
                        f"will run, and the scenario is not released). Look at the step's log and the trace; "
                        f"`{program_name()} --plan` reads it again.")
                 clashes.append(why)
@@ -1024,6 +1027,8 @@ class Runner:
         if value == CANNOT_TELL:
             raise ObserverCannotTell(f"observer for {var} cannot tell (it read no value)")
         if value == NONE_HOLDS:
+            if not isinstance(fn, DerivedObserver):
+                self._none_holds_why[var] = f"{_fn_name(fn)} gave no reasons"
             return NONE_HOLDS               # it looked: none of the values holds -> the caller makes it UNKNOWN
         if value is not None and value not in self.rc.states[var]["values"]:
             raise FixtureError(f"observer for {var} returned {value!r}, not one of {self.rc.states[var]['values']}")
@@ -1056,7 +1061,8 @@ class Runner:
         if asked and asked[-1].answer == CANNOT_TELL:
             raise ObserverCannotTell(f"observer for {sv.name} cannot tell (in order {sv.order}: "
                                      + "; ".join(v.text() for v in asked) + ")")
-        log.warning("observe %s: no value holds (%s)", sv.name, "; ".join(v.text() for v in asked))
+        self._none_holds_why[sv.name] = "; ".join(v.text() for v in asked)
+        log.warning("observe %s: no value holds (%s)", sv.name, self._none_holds_why[sv.name])
         return NONE_HOLDS
 
     async def _retry_wanted(self, run: RunContext, run_scope: Scope, step: Step, sr: StepResult, attempt: int,
