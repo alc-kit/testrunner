@@ -142,6 +142,9 @@ replaces the stored state. After a step, an observer that contradicts the model 
 
 (`from testrunner import CANNOT_TELL, NONE_HOLDS`.) A derived observer (`observe: {order}`)
 answers `NONE_HOLDS` when every value does not hold, and `CANNOT_TELL` when one value cannot tell.
+Every message that makes a variable UNKNOWN — before the plan, after a step, in the journal's
+`state_unknown` — says **why**, value by value: each value's validator answer and its reason (a
+hand-written observer that answers `NONE_HOLDS` gives none, and the message says so).
 
 **Validators** confirm a claimed value: `validate:` in the runner config, as a command, an
 `@validator` function, an extension's kind (`playbook:`), or as weak as "the step passed"
@@ -281,6 +284,7 @@ prints the whole of it as a table, which also goes in the journal and both repor
   | `{python: <name>}` (an `@validator`) | `True` | `False` | `None`, or it raises |
   | `{playbook: <path>, limit, extra, args, timeout}` (`ext.ansible`) | exit 0 | exit 2 (a task failed) | exit 4 (unreachable), any other; or `changed` under `--check` |
   | `{adhoc: {pattern, module, args}, limit}` (`ext.ansible`) | exit 0 | exit 2 | exit 4, any other; or a host `CHANGED` or `SKIPPED` |
+  | `{libvirt_net: <name>}` (`ext.rig`) | `absent`: not defined; `up`: defined, persistent, active, autostart and `Rig.network_correct` | otherwise | virsh does not answer, or the rig cannot tell |
 
   - Their values are templates like a walk step's (`{param.node}`, `{run.root}`, `{env.X}`).
   - `playbook:` and `adhoc:` always run with `--check`: a validator only looks. Under `--check`,
@@ -859,6 +863,14 @@ there also loads the inner-step kinds and resolvers it registers for walk action
     `Rig.reachable(ip)`: real TCP, unless the rig overrides it (e.g. for a sandbox of fakes).
   - `{python: support}`: the same four values as `vms` (`absent`, `up`, `halted`, `partial`),
     for the scenario's other machines.
+- the rig's **libvirt networks**, one binary region each: the validator kind
+  `{libvirt_net: <name>}` (`ext/rig/networks.py`; no import needed, it is a kind) on a variable
+  whose values are `[absent, up]`. `up` means defined, persistent, active, autostart **and**
+  correct by `Rig.network_correct(name, live_xml)`, which has no default: a rig that declares
+  networks says what a correct one is (e.g. "no host address, no forward" for an isolated LAN). A
+  network with the wrong parameters, or not active, holds neither value, so a step that claimed
+  `up` fails. Whether a system can live with only some of its networks is each step's
+  `requires`, not a `partial` value.
 
   What runs *on* the machines is a system under test, and its probes live with it, e.g. Proxmox
   VE's in [proxmox-testrunner-ext](https://github.com/alc-kit/proxmox-testrunner-ext).

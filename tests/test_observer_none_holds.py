@@ -71,6 +71,8 @@ def test_none_holds_before_the_plan_makes_the_variable_unknown(sub, capsys):
     assert code != 0
     assert "no value of sys holds" in out and "sys is UNKNOWN" in out
     assert not (sub.root / "used").exists()               # a step that requires sys does not run
+    # ... and it says WHY, value by value (the operator sees "a route to LAN B", not only "unknown")
+    assert out.count("system reads 'wrecked'") >= 3, out
 
 
 def test_control_cannot_tell_keeps_the_stored_value(sub, capsys):
@@ -92,6 +94,8 @@ def test_none_holds_after_a_step_fails_it_and_journals_unknown(sub, capsys):
     unknown = [e for e in journal(sub) if e["event"] == "state_unknown" and e.get("observed") == "no value holds"]
     assert unknown and unknown[-1]["was"] == "up", journal(sub)
     assert "finds no value of sys holding" in out
+    assert "finds no value of sys holding (the model said 'up': sys=built (observe): does not hold — " in out, out
+    assert "system reads 'wrecked'" in unknown[-1]["why"]       # the journal keeps the reason too
     end = [e for e in journal(sub) if e["event"] == "run_end"][-1]
     assert not end["passed"] and end["state"]["sys"] is None
 
