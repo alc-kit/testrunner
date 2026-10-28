@@ -179,3 +179,16 @@ def test_an_effect_on_a_failure_line_is_refused():
         parse_states("t.yml", {"sys": {"values": ["absent", "up"], "validate": {"outcome": True},
                                        "machine": "absent --> absent : make [failed] / expected += x\n"}},
                      {"expected": ["a"]})
+
+
+def test_the_look_before_the_plan_sees_the_declared_data(sub, capsys):
+    # found by B6's rig proof (2026-10-28): the observers asked BEFORE the plan had no `data`
+    # fixture, so every probe that judges against the expected nodes answered "cannot tell"
+    s = make_sub(sub)
+    s.write("testrunner.yml", (s.root / "testrunner.yml").read_text().replace(
+        "    model_only: true\n", "    observe: {order: [up, absent]}\n"))
+    s.write("system", "up")                                  # the system IS up; the store says nothing
+    code, out = run(s, capsys, "--dry-run", "grow", "--with", "node=n9")
+    assert "no fixture named 'data'" not in out
+    assert "observed sys='up'" in out, out
+    assert json.loads((s.root / "seen-expected").read_text()) == ["n1", "n2", "n3"]

@@ -848,7 +848,10 @@ there also loads the inner-step kinds and resolvers it registers for walk action
 - scope guards: only nodes that EXIST, and never an empty scope;
 - the `rig` observer, the purge of stale per-node state, drive rules for the playbooks' prompts,
   the console capture and the sweep for leftover libvirt domains;
-- the generic **regions**, as validators read once per look (`ext/rig/regions.py`):
+- the generic **regions**, as validators read once per look (`ext/rig/regions.py`). A rig opts
+  in by importing them in one of its modules
+  (`from testrunner.ext.rig.regions import machines_reading, support, vms`), because an
+  extension's validators and fixtures are the subscriber's call:
   - `{python: vms}`: `absent`, `running`, `halted` or `partial`. It is judged against the
     declared data `expected` when there is any, else the catalogue's cluster nodes. `running`
     means every expected machine runs **and** answers TCP/22; it never pings.

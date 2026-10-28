@@ -30,8 +30,6 @@ import inspect
 import logging
 
 from ...api import ERRORED, FAILED, OutcomeError, resolver, step_kind
-# the generic regions' validators and their shared reading, collected with this module (WP B5a)
-from .regions import machines_reading, support, vms  # noqa: F401
 
 log = logging.getLogger(__name__)
 

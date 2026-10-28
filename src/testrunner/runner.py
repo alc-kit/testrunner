@@ -287,7 +287,16 @@ class Runner:
         run = RunContext(self.rc, self.run_config, program, self.store)
         run.state = dict(state)
         scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui,
-                              "registry": self.reg})
+                              "registry": self.reg, "data": run.data})
+        # the declared data, as the run will start with it (stored, or initial), so an observer whose
+        # probe judges against it — the expected nodes, say — can look before the plan (found by
+        # B6's rig proof: without it every region probe answered cannot tell). Nothing is stored.
+        held, self._run_ctx = self._run_ctx, run
+        try:
+            if self.rc.data:
+                await self._init_data(run, scope, data, store=False)
+        finally:
+            self._run_ctx = held
         out = dict(state)
         read: list[str] = []
         token = STEP.set("(observe)")
@@ -741,7 +750,7 @@ class Runner:
                 await look.close()
         return before, "\n".join(stops), kept
 
-    async def _init_data(self, run: RunContext, run_scope: Scope, config: dict) -> None:
+    async def _init_data(self, run: RunContext, run_scope: Scope, config: dict, store: bool = True) -> None:
         """Declared data at run start (WP B4): the stored value, or the declared `initial` (a list, or
         a template rendered now, with the run's resolvers). Stored at once, so a run that stops
         early leaves it recorded."""
@@ -763,7 +772,7 @@ class Runner:
                          "declared" if isinstance(init, list) else f"rendered from {init!r}")
         finally:
             self._frames.pop()
-        if not self.dry:
+        if store and not self.dry:
             self.store.set_data(run.data)
 
     async def _apply_effect(self, run: RunContext, sv: Any, key: tuple[str, str, str, str], scope: Scope,
