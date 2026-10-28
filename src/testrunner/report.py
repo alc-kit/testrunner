@@ -449,6 +449,14 @@ def _states_md(run: "RunRecord") -> list[str]:
                 out += ["| from | to | by | on |", "|---|---|---|---|"]
                 out += [f"| {_md(t['from'])} | {_md(t['to'])} | {_md(t['by'])} | {_md(t['on'])} |"
                         for t in m["transitions"]] + [""]
+            tab = m.get("table") or {}
+            if tab.get("actions"):
+                acts = tab["actions"]
+                out += ["State × event (· = this action claims nothing from this value):", "",
+                        "| value | " + " | ".join(_md(a) for a in acts) + " |",
+                        "|---|" + "---|" * len(acts)]
+                out += ["| " + _md(v) + " | " + " | ".join(_md(", ".join(tab["rows"][v][a])) or "·" for a in acts)
+                        + " |" for v in tab["rows"]] + [""]
     return out
 
 
@@ -490,12 +498,22 @@ def _states_html(run: "RunRecord") -> str:
                            f"<td>{esc(v['validator']) or '—'}</td></tr>" for v in m["values"])
             trs = "".join(f"<tr><td>{esc(t['from'])}</td><td>{esc(t['to'])}</td><td>{esc(t['by'])}</td>"
                           f"<td>{esc(t['on'])}</td></tr>" for t in m["transitions"])
+            tab = m.get("table") or {}
+            acts = tab.get("actions") or []
+            grid = ""
+            if acts:
+                head = "".join(f"<th>{esc(a)}</th>" for a in acts)
+                body = "".join("<tr><td>" + esc(v) + "</td>" + "".join(
+                    f"<td>{esc(', '.join(tab['rows'][v][a])) or '·'}</td>" for a in acts) + "</tr>"
+                    for v in tab["rows"])
+                grid = ('<p class="note">State × event (· = this action claims nothing from this value)</p>'
+                        f'<table><thead><tr><th>value</th>{head}</tr></thead><tbody>{body}</tbody></table>')
             parts.append(f"<h3>{esc(m['var'])}</h3><p class=\"note\">initial: {init} · read back: "
                          f"{esc(m.get('read', ''))}</p>"
                          '<div class="card"><table><thead><tr><th>value</th><th>criterion</th><th>validator</th>'
                          f'</tr></thead><tbody>{vals}</tbody></table>'
                          + ('<table><thead><tr><th>from</th><th>to</th><th>by</th><th>on</th></tr></thead>'
-                            f'<tbody>{trs}</tbody></table>' if trs else "") + "</div>")
+                            f'<tbody>{trs}</tbody></table>' if trs else "") + grid + "</div>")
     return "".join(parts)
 
 
