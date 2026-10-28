@@ -74,7 +74,7 @@ def test_read_machines_reads_the_provider_once_and_never_pings(rig_root, tmp_pat
     async def tcp(ip, port=22, timeout=3.0):
         asked.append((ip, port))
         return True
-    monkeypatch.setattr(regions, "answers", tcp)
+    monkeypatch.setattr(regions, "answers", tcp)                   # Rig.reachable's default
     r = asyncio.run(read_machines(rig, None))
     assert fake.calls == [("status",)]                               # one reading
     assert r["expected"] == ["n1", "n2", "n3"] and r["support"] == ["cache", "hub"]
@@ -116,3 +116,27 @@ def test_control_an_extension_alone_registers_no_region_validator(sub):
     sub.write("m.py", "\n")
     reg = collect(load_runner_config(sub.root / "testrunner.yml"))
     assert "vms" not in reg.validators and "machines_reading" not in reg.fixtures
+
+
+def test_a_rig_can_override_reachable(rig_root, tmp_path, monkeypatch):
+    # the seam a sandbox of fakes needs (user 2026-10-28): the probe asks the RIG, not the socket
+    no_vagrant(tmp_path, monkeypatch)
+    fake = FakeProvider({"cache": "running", "hub": "running", "n1": "running", "n2": "running", "n3": "running",
+                         "n4": "not_created", "arb": "not_created"})
+
+    class OwnRig(Rig):
+        def machines(self, proc, params=None):
+            return fake
+
+        async def domains_left(self, proc):
+            return ["myrig_n1", "myrig_n2", "myrig_n3"]
+
+        async def reachable(self, ip, port=22, timeout=3.0):
+            return ip != "192.0.2.53"                                # n3 runs but does not answer
+    rig = OwnRig(rig_root, yaml.safe_load(DEFAULT), rig_root / "configs" / "default.yml", "default")
+
+    async def never(*a, **k):
+        raise AssertionError("the probe used the socket, not the rig's reachable()")
+    monkeypatch.setattr(regions, "answers", never)
+    r = asyncio.run(read_machines(rig, None))
+    assert judge_vms(r, "partial")[0] and not judge_vms(r, "running")[0]

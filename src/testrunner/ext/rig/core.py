@@ -286,6 +286,14 @@ class Rig:
         return self.vagrant(proc, params)
 
     # ── what exists ──
+    async def reachable(self, ip: str, port: int = 22, timeout: float = 3.0) -> bool:
+        """Does `ip:port` accept a TCP connection? The regions' probes ask this (ext/rig/regions.py:
+        a machine "runs" only when it also answers). Real TCP by default — never ping (a PVE node's
+        firewall drops ICMP, measured). A rig may override it, e.g. for a sandbox of fakes, where
+        no real machine answers (user 2026-10-28)."""
+        from .regions import answers
+        return await answers(ip, port, timeout)
+
     async def live_nodes(self, vg: MachineProvider) -> list[str]:
         """The rig's cluster nodes that EXIST right now (asked of vagrant, in catalogue order).
         Every catalogue node is asked, not only the scenario's: a node another scenario left

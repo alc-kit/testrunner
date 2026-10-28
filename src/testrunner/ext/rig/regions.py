@@ -10,7 +10,8 @@ Two validators and the one reading they share (a `look` fixture: one reading per
              nodes from the catalogue:
                absent   no domain of a cluster machine exists
                running  every expected machine runs AND answers TCP/22 (never ping: a PVE node's
-                        firewall drops ICMP from the management network, measured 2026-10-28)
+                        firewall drops ICMP from the management network, measured 2026-10-28);
+                        "answers" is Rig.reachable(ip), real TCP unless the rig overrides it
                halted   every expected machine exists, and none runs
                partial  anything else (some exist, some run, or one runs but does not answer)
     support  the scenario's other machines that the Vagrantfile defines (a cache, a Tang server,
@@ -76,7 +77,7 @@ async def read_machines(rig: Any, expected: list[str] | None) -> dict:
     support = [n for n in cat.members() if n not in cat.cluster() and n in states]
     machines = {n: states.get(n, NOT_CREATED) for n in {*cat.catalogue_cluster(), *cluster, *support}}
     running = [n for n, st in machines.items() if st == "running"]
-    up = dict(zip(running, await asyncio.gather(*(answers(str(cat.machines[n]["ip"])) for n in running
+    up = dict(zip(running, await asyncio.gather(*(rig.reachable(str(cat.machines[n]["ip"])) for n in running
                                                    if n in cat.machines))))
     reading = {"expected": cluster, "support": support, "states": machines, "answers": up,
                "domains": await rig.domains_left(proc),

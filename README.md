@@ -854,7 +854,8 @@ there also loads the inner-step kinds and resolvers it registers for walk action
   extension's validators and fixtures are the subscriber's call:
   - `{python: vms}`: `absent`, `running`, `halted` or `partial`. It is judged against the
     declared data `expected` when there is any, else the catalogue's cluster nodes. `running`
-    means every expected machine runs **and** answers TCP/22; it never pings.
+    means every expected machine runs **and** answers TCP/22; it never pings. "Answers" is
+    `Rig.reachable(ip)`: real TCP, unless the rig overrides it (e.g. for a sandbox of fakes).
   - `{python: support}`: the same four values as `vms` (`absent`, `up`, `halted`, `partial`),
     for the scenario's other machines.
 
