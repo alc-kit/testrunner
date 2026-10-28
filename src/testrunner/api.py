@@ -100,6 +100,10 @@ class ValidatorKindMark:
 
 # A validator's three answers about one `var=value` (validate.py)
 HOLDS, DOES_NOT_HOLD, CANNOT_TELL = "holds", "does not hold", "cannot tell"
+# An observer's answer when it LOOKED and the system is in none of the variable's values: the
+# model is wrong, and no value can replace it — the variable becomes UNKNOWN. Not CANNOT_TELL,
+# which means the observer did not look (the model's value is kept).
+NONE_HOLDS = "no value holds"
 
 
 def action(name: str | None = None, *, requires: Mapping[str, Any] | None = None,
@@ -158,9 +162,13 @@ def fixture(fn: Callable | None = None, *, name: str | None = None, scope: str =
 
 
 def observer(var: str) -> Callable:
-    """Export a function that reads the REAL value of a state variable. It returns one of the
-    variable's values, or CANNOT_TELL when it did not read one: the variable then keeps the value it
-    had (an unknown stays unknown). Never a guess: whatever it returns is stored as reality."""
+    """Export a function that reads the REAL value of a state variable. It returns one of three:
+    - one of the variable's values: it read that value, and it is stored as reality;
+    - CANNOT_TELL: it did not read a value; the variable keeps the value it had (an unknown
+      stays unknown);
+    - NONE_HOLDS: it looked, and the system is in none of the variable's values; the variable
+      becomes UNKNOWN (the model's value is wrong, and nothing can replace it).
+    Never a guess: whatever value it returns is stored as reality."""
     def mark(fn: Callable) -> Callable:
         setattr(fn, MARK, ObserverMark(var=var))
         return fn

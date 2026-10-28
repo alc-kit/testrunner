@@ -66,7 +66,10 @@ def test_a_value_that_cannot_tell_means_the_observer_cannot_look(sub, capsys):
     s.write("unsure", "")                           # `up` cannot tell: `absent` must NOT be taken
     code, out, _ = run(s, capsys, "use")
     assert code != 0
-    assert "could not observe" in out and "sys=up (observe): cannot tell" in out
+    # a value that cannot tell stops the search: the observer could not look, so the stored value
+    # stays (never NONE_HOLDS, never the next value in the order)
+    assert "observer for sys cannot tell" in out and "sys=up (observe): cannot tell" in out
+    assert "sys stays" in out and "no value of sys holds" not in out
 
 
 def test_a_derived_observer_confirms_what_a_step_claims(sub, capsys):

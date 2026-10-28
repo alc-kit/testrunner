@@ -132,9 +132,16 @@ def service_state(api): return api.status()
 They are asked before the plan is judged, when the run starts, and after every step, whatever
 its outcome, except after a `readonly` action, which only looks. At the start, what they read
 replaces the stored state. After a step, an observer that contradicts the model FAILS the step
-(see [State machine](#state-machine)). An observer that did not read a value returns
-`CANNOT_TELL` (`from testrunner import CANNOT_TELL`). The variable then keeps the value it had,
-an unknown stays unknown, and the output says which observer could not tell.
+(see [State machine](#state-machine)). An observer answers one of three things:
+- **a value**: it read that value, and the value is stored as reality;
+- **`CANNOT_TELL`**: it did not read a value. The variable keeps the value it had, an unknown
+  stays unknown, and the output says which observer could not tell;
+- **`NONE_HOLDS`**: it looked, and the system is in none of the variable's values. The variable
+  becomes **unknown**: before the plan, the steps that require it are refused; after a step,
+  that step fails. It is journalled as `state_unknown` with `observed: "no value holds"`.
+
+(`from testrunner import CANNOT_TELL, NONE_HOLDS`.) A derived observer (`observe: {order}`)
+answers `NONE_HOLDS` when every value does not hold, and `CANNOT_TELL` when one value cannot tell.
 
 **Validators** confirm a claimed value: `validate:` in the runner config, as a command, an
 `@validator` function, an extension's kind (`playbook:`), or as weak as "the step passed"
@@ -259,7 +266,9 @@ prints the whole of it as a table, which also goes in the journal and both repor
   - a value the model does not know (unknown) is learned from the observer, but only when the
     observer READ a value. An observer that cannot tell which value it is returns `CANNOT_TELL`,
     and the variable stays unknown. It must never answer a guess, such as a lower bound: a guess
-    would be stored as reality.
+    would be stored as reality;
+  - an observer that finds no value holding (`NONE_HOLDS`) makes the variable unknown, and fails
+    the step.
 - **Observers derived from validators**: `observe: {order: [clustered, installed, up, absent]}`
   asks each value's validator in that order, and the first that holds is the value. An earlier
   value that *cannot tell* stops the search: the observer cannot look, and the run warns and keeps
