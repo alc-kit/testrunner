@@ -26,7 +26,7 @@ subscriber's `state_dir`. A subscriber pulls testrunner in as a git subtree and 
 | you need to ... | write a ... | it is |
 |---|---|---|
 | DO something to the system (install, power on, break a disk) | **action** | `@action(...)` in a module listed in `modules:`, or a shell export under `actions:` |
-| give steps something they NEED (a client, a connection, credentials) | **fixture** | `@fixture(scope="run"\|"step")`; set up on first use, torn down at the scope's end, also after a failure |
+| give steps something they NEED (a client, a connection, credentials) | **fixture** | `@fixture(scope="run"\|"step"\|"look")`; set up on first use, torn down at the scope's end, also after a failure. `look`: once per act of judging a state variable, shared by its validators (read the system once, judge every value) |
 | READ what the system IS (power, version, membership) | **observer** | `@observer("<state var>")`; asked before the plan is judged, at run start, after every state-changing step. Or `observe: {order: [...]}`, derived from the validators |
 | CONFIRM that a claimed value holds (a step said "installed": is it?) | **validator** | `validate:` per value in `states:` — `{run: ...}`, `{playbook: ...}`, `{python: <name>}` (an `@validator`), or as weak as `{outcome: true}`; an extension adds kinds with `@validator_kind` |
 | act AROUND steps (refuse a run, adjust the config, record metrics) | **hook** | `@hook("run_config"\|"run_start"\|"step_start"\|"step_end"\|"run_end")` |
