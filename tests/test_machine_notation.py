@@ -86,7 +86,8 @@ def test_an_inner_step_can_be_the_action():
     ("up --> [*] : destroy [passed]\n", "a transition to `[*]`"),
     ("absent --> nowhere : up [passed]\n", "'nowhere' is not one of"),
     ("absent --> up : up [passed]\nabsent --> up : up [passed]\n", "declared twice"),
-    ("up --> absent : addnode [passed] / expected += late\n", "a UML effect"),
+    ("up --> absent : addnode [passed] / expected += late\n", "which is not declared under data"),
+    ("up --> absent : addnode [passed] / call_home()\n", "a UML effect is"),
     ("absent --> up : up [passed]\nstateDiagram-v2\n", "may only be the first line"),
     ("", "want a block of lines"),
 ])

@@ -473,6 +473,10 @@ def listing(rc, reg) -> int:
         print("paths:" + (f"  (default: {rc.default_path})" if rc.default_path else ""))
         for name, steps in rc.paths.items():
             print(f"  {name}: {steps}")
+    if rc.data:
+        print("data:  (extended state: sets, changed only by a confirmed transition's `/ name += | -= ...`)")
+        for name, init in rc.data.items():
+            print(f"  {name}: initial {init}")
     if rc.states:
         print("states:")
         for var, sv in rc.states.items():
@@ -484,7 +488,8 @@ def listing(rc, reg) -> int:
                 print(f"    {value:<14} {sv.criteria.get(value, '(no criterion)')}"
                       + (f"  — validate {{{spec_text(v)}}}" if v else ""))
             for t in sv.transitions:
-                print(f"    {t.frm} -> {t.to}  by {t.by} on {t.on}")
+                eff = sv.effects.get((t.frm, t.by, t.on, t.to))
+                print(f"    {t.frm} -> {t.to}  by {t.by} on {t.on}" + (f"  / {eff[0]} {eff[1]} {eff[2]}" if eff else ""))
             for line in table_text(sv):
                 print(line)
     if reg.fixtures:

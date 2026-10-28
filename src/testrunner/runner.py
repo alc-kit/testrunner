@@ -50,7 +50,7 @@ from .ui import InputBroker
 log = logging.getLogger(__name__)
 _ABSENT = object()
 
-BUILTIN_RUN = {"run", "config", "store", "ui", "registry"}
+BUILTIN_RUN = {"run", "config", "store", "ui", "registry", "data"}
 BUILTIN_STEP = {"step", "params", "proc", "state"}
 
 
@@ -134,6 +134,7 @@ class RunContext(Background):
         self.forwarded: tuple[str, ...] = ()     # the arguments after `--`
         self.secrets = Secrets(values_at(run_config.data, run_config.nolog_paths))
         self.state: dict[str, Any] = {}
+        self.data: dict[str, list[str]] = {}     # declared data (extended state, WP B4): name -> a set, as a list
         self.results: list[StepResult] = []
         self.current: StepContext | None = None
         self.last_output = ""        # what the last executed step printed (retry evidence)
@@ -340,7 +341,7 @@ class Runner:
         run.secrets = self.secrets
         run.forwarded = self.forwarded
         run.dry = self.dry
-        run_scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui,
+        run_scope = Scope("run", {"run": run, "config": data, "store": self.store, "ui": self.ui, "data": run.data,
                                   "registry": self.reg})
         self._run_ctx, self._run_scope = run, run_scope
         self.ui.attach()
@@ -367,10 +368,13 @@ class Runner:
         if pre is not None and not reuse:
             log.info("the store changed since the look before the plan (%s, now %s): looking again",
                      pre["from"], state)
+        if rc.data:
+            await self._init_data(run, run_scope, data)
         self.journal("run_start", config=str(self.run_config.file or ""), source=program.source,
                      matrix=matrix(program, self.reg), machine=describe(rc.states, self.reg),
                                   steps=[s.id for s in program.main], state=state, pid=os.getpid(),
                      readonly=self.readonly, **({"forwarded": list(self.forwarded)} if self.forwarded else {}),
+                     **({"data": run.data} if run.data else {}),
                      **({"observed_before_plan": {k: pre[k] for k in ("read", "could_not_tell", "seconds")}}
                         if reuse else {}))
         try:
@@ -425,7 +429,8 @@ class Runner:
             if problems and result.passed:
                 log.error("run-scope background problems fail the run: %s", problems)
                 result.passed, result.why = False, "; ".join(problems)
-            self.journal("run_end", passed=result.passed, why=result.why, state=run.state)
+            self.journal("run_end", passed=result.passed, why=result.why, state=run.state,
+                         **({"data": run.data} if run.data else {}))
             log.info("run %s ends %s%s; state %s", self.run_id, "PASSED" if result.passed else "FAILED",
                      f" ({result.why})" if result.why else "", run.state)
             rw = rc.release_when
@@ -736,6 +741,57 @@ class Runner:
                 await look.close()
         return before, "\n".join(stops), kept
 
+    async def _init_data(self, run: RunContext, run_scope: Scope, config: dict) -> None:
+        """Declared data at run start (WP B4): the stored value, or the declared `initial` (a list, or
+        a template rendered now, with the run's resolvers). Stored at once, so a run that stops
+        early leaves it recorded."""
+        stored = self.store.get_data()
+        params = (config or {}).get(self.rc.params_section) or {}
+        ctx = _ObserveCtx("(data)")
+        self._frames.append(WalkFrame(_NoWalk("data"), params, ctx))
+        try:
+            for name, init in self.rc.data.items():
+                if name in stored:
+                    run.data[name] = list(stored[name])
+                    continue
+                value = init if isinstance(init, list) else await template.render(init, self._resolver(run_scope, ctx))
+                value = value if isinstance(value, list) else [value]
+                if not all(isinstance(x, str) for x in value):
+                    raise FixtureError(f"data.{name}.initial rendered to {value!r}: want names")
+                run.data[name] = list(dict.fromkeys(value))
+                log.info("data %s: initial %s (%s)", name, run.data[name],
+                         "declared" if isinstance(init, list) else f"rendered from {init!r}")
+        finally:
+            self._frames.pop()
+        if not self.dry:
+            self.store.set_data(run.data)
+
+    async def _apply_effect(self, run: RunContext, sv: Any, key: tuple[str, str, str, str], scope: Scope,
+                            ctx: StepContext, act: ActionSpec) -> None:
+        """A confirmed claim's UML effect (WP B4, D9 decision 2): `/ <data> += | -= <template>` on its
+        line. Set union / difference; the journal says what it was, what it is, and when nothing
+        changed. Applied only here, after the claim's validator held."""
+        eff = sv.effects.get(key)
+        if eff is None:
+            return
+        name, op, tmpl = eff
+        walk = act.walk if act.kind == "walk" else self._frames[-1].walk if self._frames else None
+        self._frames.append(WalkFrame(walk or _NoWalk(act.name), ctx.params, ctx))
+        try:
+            got = await template.render(tmpl, self._resolver(scope, ctx))
+        finally:
+            self._frames.pop()
+        names = [str(x) for x in (got if isinstance(got, list) else [got])]
+        was = list(run.data.get(name, []))
+        now = ([*was, *[x for x in names if x not in was]] if op == "+=" else [x for x in was if x not in names])
+        run.data[name] = now
+        log.info("%s: data %s %s %s -> %s (was %s)%s", ctx.id, name, op, names, now, was,
+                 "" if now != was else " — no change")
+        self.journal("data_changed", step=ctx.id, name=name, op=op, value=names, was=was, now=now,
+                     by=f"{key[0]} --> {key[3]} : {key[1]} [{key[2]}]")
+        if not self.dry:
+            self.store.set_data(run.data)
+
     async def _settle(self, run: RunContext, act: ActionSpec, ctx: StepContext, outcome: Outcome,
                       scope: Scope, proc: Proc, results: list) -> tuple[Outcome, dict]:
         """Apply a step's effect on every variable its claimer declares a transition for, from
@@ -783,6 +839,7 @@ class Runner:
                                          verdicts=[v.record()])
                         else:
                             self._state_event("state_changed", ctx, var, cur, to, by, outcome.name, v)
+                        await self._apply_effect(run, sv, (cur, by, outcome.name, to), scope, ctx, act)
                         continue
                     log.warning("%s: the claim %s=%s %s: %s", ctx.id, var, to, v.answer, v.why)
                 # no claim on this outcome, or a claim that did not hold: what did it really leave?
@@ -1348,6 +1405,11 @@ class Runner:
                 return os.environ[name[4:]]
             if name.startswith("state."):
                 return run.state.get(name[6:])
+            if name.startswith("data."):
+                if name[5:] not in run.data:
+                    raise template.TemplateError(f"{{{name}}}: no declared data {name[5:]!r} (declared: "
+                                                 f"{', '.join(sorted(run.data)) or 'none'})")
+                return list(run.data[name[5:]])
             facts = {"run.root": str(self.rc.root), "run.id": self.run_id, "run.state_dir": str(self.store.root),
                      "run.config": str(self.run_config.file or ""), "step.id": ctx.id, "step.parent": frame.ctx.id}
             if name in facts:

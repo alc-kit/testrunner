@@ -8,6 +8,8 @@ Two kinds of file:
 """
 from __future__ import annotations
 
+import re
+
 import copy
 import logging
 import os
@@ -122,6 +124,9 @@ class RunnerConfig:
     action_files: list[str] = field(default_factory=list)
     state_dir: Path = Path("state")
     states: dict[str, Any] = field(default_factory=dict)      # name -> statemachine.StateVar
+    # extended state (WP B4): declared data, each a SET of names, changed only by a transition's
+    # `/ <name> += | -= <template>` effect when its claim is confirmed; name -> its `initial`
+    data: dict[str, Any] = field(default_factory=dict)
     paths: dict[str, list] = field(default_factory=dict)
     default_path: str | None = None
     # what the CLI word `all` runs when the run config's plan is empty (`all: {fallback: <path>}`)
@@ -152,6 +157,28 @@ def _strings(value: Any, path: Path, key: str) -> list[str]:
     return list(value)
 
 
+def _parse_data(path: Path, raw: Any) -> dict[str, Any]:
+    """`data: {<name>: {initial: [<names>] | "<template>"}}` (WP B4): extended state, a set of names.
+    The initial value is a list, or a template rendered at run start (an extension's resolver,
+    e.g. the rig's expected cluster nodes)."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: data: want {{<name>: {{initial: [<names>] | <template>}}}}")
+    out: dict[str, Any] = {}
+    for name, spec in raw.items():
+        name = str(name)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ConfigError(f"{path}: data.{name}: a data name is a plain identifier")
+        if not isinstance(spec, dict) or set(spec) != {"initial"}:
+            raise ConfigError(f"{path}: data.{name}: want {{initial: [<names>] | <template>}}")
+        init = spec["initial"]
+        if not (isinstance(init, str) or (isinstance(init, list) and all(isinstance(x, str) for x in init))):
+            raise ConfigError(f"{path}: data.{name}.initial: want a list of names, or a template string")
+        out[name] = init
+    return out
+
+
 def find_runner_config(start: Path) -> Path:
     cur = Path(start).resolve()
     for d in (cur, *cur.parents):
@@ -161,7 +188,7 @@ def find_runner_config(start: Path) -> Path:
     raise ConfigError(f"no {' / '.join(RUNNER_FILES)} in {cur} or above")
 
 
-KNOWN_RUNNER_KEYS = {"modules", "actions", "action_files", "state_dir", "states", "paths", "default_path",
+KNOWN_RUNNER_KEYS = {"modules", "actions", "action_files", "state_dir", "states", "data", "paths", "default_path",
                      "configs", "params_section", "input", "scenario", "pythonpath", "all", "ext"}
 
 
@@ -173,8 +200,12 @@ def load_runner_config(path: Path) -> RunnerConfig:
     if unknown:
         raise ConfigError(f"{path}: unknown key(s) {', '.join(sorted(unknown))}")
     root = path.parent
+    declared_data = _parse_data(path, data.get("data"))
     from .statemachine import parse_states
-    states = parse_states(path, data.get("states"))
+    states = parse_states(path, data.get("states"), declared_data)
+    clash = set(declared_data) & set(states)
+    if clash:
+        raise ConfigError(f"{path}: {', '.join(sorted(clash))}: declared as both a state variable and data")
     paths = data.get("paths") or {}
     for name, steps in paths.items():
         if not isinstance(steps, list):
@@ -211,7 +242,7 @@ def load_runner_config(path: Path) -> RunnerConfig:
         shell_actions=data.get("actions") or {},
         action_files=_strings(data.get("action_files"), path, "action_files"),
         state_dir=root / data.get("state_dir", "state"),
-        states=states, paths=paths, default_path=default_path, all_fallback=all_fallback, ext=ext,
+        states=states, data=declared_data, paths=paths, default_path=default_path, all_fallback=all_fallback, ext=ext,
         configs_dir=root / configs.get("dir", "configs"),
         config_env=configs.get("env"), config_link=configs.get("link"),
         default_config=configs.get("default", "default"),
