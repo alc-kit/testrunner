@@ -38,6 +38,8 @@ def sys_is(claim):
     s = (HERE / "system").read_text().strip() if (HERE / "system").exists() else "absent"
     if knob("ambiguous") and claim.value in ("quorum", "split"):
         return True, "the probe cannot tell quorum from split"
+    if knob("unsure-split") and claim.value == "split":
+        return None, "the split probe could not reach the node"
     return s == claim.value, f"the system reads {s!r}"
 
 @action(requires={"sys": ["absent", "quorum"]},
@@ -124,6 +126,17 @@ def test_two_modes_holding_at_once_fail_the_test(sub, capsys):
     assert code == 1 and "2 of its modes hold at once (quorum, split" in out
     assert stored(s)["sys"] == "absent" and not (s.root / "fixed").exists()
 
+
+
+def test_a_mode_that_cannot_tell_fails_the_test_even_if_another_holds(sub, capsys):
+    # quorum holds, but split could not be looked at: split might be the truth, so the failure
+    # cannot be classified, and the test fails (undefined is a failure)
+    s = make_sub(sub)
+    s.write("make-leaves", "quorum")
+    s.write("unsure-split", "1")
+    code, out = s.run(capsys=capsys)
+    assert code == 1 and "could not be classified: a mode cannot tell" in out
+    assert stored(s)["sys"] == "absent" and not (s.root / "fixed").exists()
 
 def test_retry_on_a_listed_failure_mode(sub, capsys):
     plan = """plan:
