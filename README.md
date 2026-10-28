@@ -14,7 +14,8 @@ and an operator who can still type while things run.
 testrunner keeps **no state of its own**. Everything persistent lives in the project
 that uses it (the *subscriber*), written through the store API testrunner provides.
 
-Requires Python ≥ 3.11 and, for YAML configs, PyYAML. TOML needs nothing extra.
+Requires Python ≥ 3.11 (CI tests 3.11–3.15) and, for YAML configs, PyYAML. TOML needs nothing
+extra.
 
 ## Use it in a project
 
