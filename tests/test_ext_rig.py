@@ -472,6 +472,27 @@ def test_a_rig_with_its_own_provider_never_runs_vagrant(rig_root, tmp_path, monk
     assert all(c[0] == "status" for c in fake.calls)
 
 
+def test_observe_rig_cannot_tell_an_unknown_rig_whose_nodes_exist(rig_root, tmp_path, monkeypatch):
+    # Measured 2026-10-28 (lab run baf2f66c): `form` left rig UNKNOWN (no value held), and
+    # observe_rig then answered its floor, 'up', for a rig with PVE installed and a cluster on
+    # one node; the runner stored it as reality. It cannot tell, so it must say so.
+    from testrunner import CANNOT_TELL
+    no_vagrant(tmp_path, monkeypatch)
+    fake = FakeProvider({"n1": "running", "n2": "running", "n3": "not_created"})
+
+    class OwnRig(Rig):
+        def machines(self, proc, params=None):
+            return fake
+    import yaml
+    rig = OwnRig(rig_root, yaml.safe_load(DEFAULT), rig_root / "configs" / "default.yml", "default")
+    assert asyncio.run(rig.observe_rig({"rig": None})) == CANNOT_TELL
+    assert asyncio.run(rig.observe_rig({})) == CANNOT_TELL                       # never stored at all
+    # controls: what it CAN tell is unchanged
+    assert asyncio.run(rig.observe_rig({"rig": "installed"})) == "installed"
+    fake.states = {n: "not_created" for n in fake.states}
+    assert asyncio.run(rig.observe_rig({"rig": None})) == "absent"              # no node: it looked
+
+
 def test_control_the_default_provider_is_vagrant(rig_root, tmp_path, monkeypatch):
     from testrunner.ext.vagrant import Vagrant
     from testrunner.proc import Proc
