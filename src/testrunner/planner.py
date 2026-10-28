@@ -884,11 +884,12 @@ def matrix(prog: Program, reg: Registry, prefix: str = "", depth: int = 0,
             after = ", ".join(f"{k}: " + (" ".join(f"{a}->{b}" for a, b in v.items()) if isinstance(v, dict) else str(v))
                               for k, v in spec.items())
             if not after:
-                # a failure is NOT JUDGED (user 2026-10-28): the value from before is kept, and no
-                # validator asks what it left (runner._keep_after_failure). Any other outcome of an
-                # action that claims a change on SOME outcome is checked by its validators.
+                # a failure with no declared expected end result keeps the value from before (user
+                # 2026-10-28; runner._settle_failure): there is nothing declared to look for. One
+                # with a declared end result shows it above, and its validator checks it. Any other
+                # outcome of an action that claims a change on SOME outcome is checked by its validators.
                 if o in ("failed", "errored", "aborted"):
-                    after = "(kept: not judged)" if act.produces or act.produces_on else "(unchanged)"
+                    after = "(kept: no end result declared)" if act.produces or act.produces_on else "(unchanged)"
                 else:
                     after = "(checked: unchanged, reached, or unknown)" if act.produces or act.produces_on \
                         else "(unchanged)"

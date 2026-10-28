@@ -235,7 +235,7 @@ def test_plan_matrix_prints_the_matrix(subscriber, capsys):
     assert "join" in table and "rig: installed|clustered" in table
     assert "outcome passed rig=clustered -> continue; otherwise -> stop (failed)" in table
     failed = next(ln for ln in table.splitlines() if "| failed " in ln and "goto form" in ln)
-    assert "(kept: not judged)" in failed                 # a failure is not judged (user 2026-10-28)
+    assert "(kept: no end result declared)" in failed                 # a failure is not judged (user 2026-10-28)
     assert "| outcome failed rig=installed -> goto form; outcome failed -> run membership, then go on" in failed
     assert "passed*" in table and "stop (aborted)" in table
     assert "on join otherwise: stop (failed)" in out
@@ -252,7 +252,7 @@ def test_the_matrix_is_journaled_and_in_both_reports(subscriber, capsys):
     rows = start["matrix"]
     i = next(i for i, r in enumerate(rows) if r["step"] == "join")
     assert rows[i]["outcome"] == "passed*" and rows[i + 1]["outcome"] == "failed"
-    assert "goto form" in rows[i + 1]["next"] and rows[i + 1]["after"] == "(kept: not judged)"
+    assert "goto form" in rows[i + 1]["next"] and rows[i + 1]["after"] == "(kept: no end result declared)"
     for fmt, needle in (("md", "## State/event matrix"), ("html", "<h2>State/event matrix</h2>")):
         main(["--root", str(subscriber.root), "--color", "never", "--report-of", "last", "--report-format", fmt])
         path = capsys.readouterr().out.strip().splitlines()[0]

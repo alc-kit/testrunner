@@ -333,9 +333,9 @@ $ testrunner --plan --matrix          # the join step of the example above
   step    | requires (state in)      | outcome (event) | state after                               | next
   --------+--------------------------+-----------------+-------------------------------------------+------------------------------------
   join    | rig: installed|clustered | passed*         | rig: clustered                            | outcome passed rig=clustered -> continue; otherwise -> stop (failed)
-          |                          | failed          | (kept: not judged)                        | outcome failed rig=installed -> goto form; outcome failed -> run membership, then go on
-          |                          | errored         | (kept: not judged)                        | otherwise -> stop (failed)
-          |                          | aborted         | (kept: not judged)                        | stop (aborted)
+          |                          | failed          | (kept: no end result declared)            | outcome failed rig=installed -> goto form; outcome failed -> run membership, then go on
+          |                          | errored         | (kept: no end result declared)            | otherwise -> stop (failed)
+          |                          | aborted         | (kept: no end result declared)            | stop (aborted)
 ```
 
 **Editing a walk.** A run config's `edit:` list changes the walk its plan compiles to, without
