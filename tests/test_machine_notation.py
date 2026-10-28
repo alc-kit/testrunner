@@ -96,17 +96,19 @@ def test_refused(text, why):
         machine(text)
 
 
-def test_one_end_result_per_value_action_and_outcome():
-    # two failure modes for one outcome: refused until classification exists (WP step B1c)
-    with pytest.raises(ConfigError, match=r"make \[failed\] from 'absent' has 2 end results \(broken, up\)"):
-        machine("absent --> up : make [failed]\nabsent --> broken : make [failed]\n",
+def test_one_end_result_per_value_action_and_outcome_except_failure_modes():
+    # a passed claim has ONE end result: two are refused (the runner would have to pick one)
+    with pytest.raises(ConfigError, match=r"make \[passed\] from 'absent' has 2 end results \(broken, up\)"):
+        machine("absent --> up : make [passed]\nabsent --> broken : make [passed]\n",
                 values=["absent", "up", "broken"])
     with pytest.raises(ConfigError, match=r"has 2 end results .*\(with the \* line\)"):
         parse_states("t.yml", {"rig": {"values": ["absent", "up", "broken"], "validate": {"outcome": True},
-                                       "transitions": [{"from": "*", "to": "broken", "by": "make", "on": "failed"},
-                                                       {"from": "absent", "to": "up", "by": "make", "on": "failed"}]}})
-    # control: different outcomes, or different values, are separate questions
-    machine("absent --> up : make [passed]\nabsent --> broken : make [failed]\n", values=["absent", "up", "broken"])
+                                       "transitions": [{"from": "*", "to": "broken", "by": "make", "on": "passed"},
+                                                       {"from": "absent", "to": "up", "by": "make", "on": "passed"}]}})
+    # a failure's several end results are its MODES (WP B1c): accepted
+    sv = machine("absent --> up : make [failed]\nabsent --> broken : make [failed]\n",
+                 values=["absent", "up", "broken"])["rig"]
+    assert {t.to for t in sv.transitions if t.on == "failed"} == {"up", "broken"}
 
 
 def test_machine_and_transitions_exclude_each_other():
