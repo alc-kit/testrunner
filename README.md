@@ -241,14 +241,21 @@ prints the whole of it as a table, which also goes in the journal and both repor
     `(answer, why)`.
 - **Claims are confirmed.** After a step, for every variable its action declares a transition
   for, from the value the variable has now:
+  - **The action ended `failed`, `errored` or `aborted`: NOT JUDGED.** No validator is asked
+    what it left. Every variable it has a transition for keeps its value from before the step,
+    the last confirmed state, journalled as `state_kept`. No observer overwrites it after the
+    step. A failure needs live examination before anything progresses; the next run's start look
+    reads the bench as it really is. The scenario is still never released on what nobody looked
+    at: the release look reads reality (into a copy, so the kept value stays), and a kept value
+    that no observer can read keeps the scenario.
   - **The outcome claims a change**: the target value's validator is asked. If it *holds*, the
     change is committed and journalled as `state_changed`, with the validator that confirmed it.
     Otherwise the step **fails**, and the variable is checked as below.
-  - **The outcome claims nothing, or the claim did not hold** (a failed, errored or aborted
-    step; a refused claim): nothing is assumed. The value before, and every value the action's
-    transitions could lead to, are asked:
-    - exactly one holds: that is the value (`state_checked` when it is unchanged; `state_changed`,
-      "reached although the step ended failed", when it moved);
+  - **The outcome claims nothing, or the claim did not hold** (a passed or skipped step that
+    claims nothing; a refused claim): nothing is assumed. The value before, and every value the
+    action's transitions could lead to, are asked:
+    - exactly one holds: that is the value (`state_checked` when it is unchanged; `state_changed`
+      when it moved);
     - none holds, several hold, or one cannot tell: the variable becomes **unknown**, and the
       step fails. Its error tells the whole story: the claim, every validator's answer and why,
       what is blocked (steps that require the variable do not run; the scenario is not
@@ -302,9 +309,9 @@ $ testrunner --plan --matrix          # the join step of the example above
   step    | requires (state in)      | outcome (event) | state after                               | next
   --------+--------------------------+-----------------+-------------------------------------------+------------------------------------
   join    | rig: installed|clustered | passed*         | rig: clustered                            | outcome passed rig=clustered -> continue; otherwise -> stop (failed)
-          |                          | failed          | (checked: unchanged, reached, or unknown) | outcome failed rig=installed -> goto form; outcome failed -> run membership, then go on
-          |                          | errored         | (checked: unchanged, reached, or unknown) | otherwise -> stop (failed)
-          |                          | aborted         | (checked: unchanged, reached, or unknown) | stop (aborted)
+          |                          | failed          | (kept: not judged)                        | outcome failed rig=installed -> goto form; outcome failed -> run membership, then go on
+          |                          | errored         | (kept: not judged)                        | otherwise -> stop (failed)
+          |                          | aborted         | (kept: not judged)                        | stop (aborted)
 ```
 
 **Editing a walk.** A run config's `edit:` list changes the walk its plan compiles to, without

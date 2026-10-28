@@ -57,7 +57,9 @@ The state model is the framework's spine. Everything else is judged against it.
    not move it backwards.
 3. **Every claim is confirmed; nothing is assumed.** Declare every transition in `states:` (the
    actions' `produces` must agree), and give every value a validator. A claim is committed only
-   when its validator holds. After a step that claims nothing, or whose claim did not hold, the
+   when its validator holds. A step whose action ended `failed`, `errored` or `aborted` is not
+   judged: the value from before is kept, and the bench needs live examination. After a passed
+   step that claims nothing, or whose claim did not hold, the
    value before and every reachable value are asked, and exactly one may hold; otherwise the
    variable is unknown and the step fails. The observers read again after every state-changing
    step: if they contradict the model, the step fails. Choose each validator's strength

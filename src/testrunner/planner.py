@@ -884,10 +884,14 @@ def matrix(prog: Program, reg: Registry, prefix: str = "", depth: int = 0,
             after = ", ".join(f"{k}: " + (" ".join(f"{a}->{b}" for a, b in v.items()) if isinstance(v, dict) else str(v))
                               for k, v in spec.items())
             if not after:
-                # an action that claims a change on SOME outcome is checked after every other one:
-                # its validators say what it left (validate.py; runner._settle)
-                after = "(checked: unchanged, reached, or unknown)" if act.produces or act.produces_on \
-                    else "(unchanged)"
+                # a failure is NOT JUDGED (user 2026-10-28): the value from before is kept, and no
+                # validator asks what it left (runner._keep_after_failure). Any other outcome of an
+                # action that claims a change on SOME outcome is checked by its validators.
+                if o in ("failed", "errored", "aborted"):
+                    after = "(kept: not judged)" if act.produces or act.produces_on else "(unchanged)"
+                else:
+                    after = "(checked: unchanged, reached, or unknown)" if act.produces or act.produces_on \
+                        else "(unchanged)"
             if o == "aborted":
                 nxt = "stop (aborted)"
             elif rules is not None:

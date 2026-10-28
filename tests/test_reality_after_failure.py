@@ -2,8 +2,9 @@
 rig: `up` built every VM, then failed on a missing host tool; the runner kept the
 model's `rig: absent` (a failed outcome produces nothing, and only the variables a step
 produced were re-observed), and release_when {rig: absent} then RELEASED the scenario
-over five running VMs. Reality is read after every step, whatever its outcome, and a
-scenario is only released on an observed state."""
+over five running VMs. A scenario is only released on an observed state. (Since 2026-10-28 a
+failed step is not judged: the recorded value is the one from before, and the release look reads
+reality into a copy to decide, without changing that value.)"""
 import json
 
 SUB = """
@@ -20,7 +21,7 @@ scenario: {release_when: {sys: absent}}
 """
 MOD = """
 from pathlib import Path
-from testrunner import action, observer
+from testrunner import action, hook, observer
 
 SYS = Path(__file__).parent / "system"
 
@@ -34,6 +35,11 @@ def look():
 def build_then_fail():
     SYS.mkdir(exist_ok=True)            # the system now exists ...
     raise RuntimeError("a host tool is missing")   # ... and the step fails anyway
+
+@hook("run_end")
+def seen_at_the_end(run):
+    import json
+    (Path(__file__).parent / "state-at-run-end").write_text(json.dumps(run.state))
 
 @action(produces={"sys": {"absent": "up"}})
 def fail_cleanly():
@@ -55,12 +61,18 @@ def scenario_kept(sub):
     return (sub.root / "state" / "scenario.json").exists()
 
 
-def test_a_failed_step_that_built_the_system_is_judged_by_reality(sub, capsys):
+def test_a_failed_step_that_built_the_system_never_releases_the_scenario(sub, capsys):
+    # A failure is NOT judged (user 2026-10-28): the recorded value stays the one from before
+    # ('absent'), and the bench needs live examination. The release is still decided on what IS:
+    # the release look reads 'up' (into a copy), so the scenario stays — the 2026-10-11 defect
+    # (released over five running VMs) cannot come back through the kept value.
     make(sub)
     code, out = sub.run("build-then-fail", capsys=capsys)
     assert code == 1
-    assert stored(sub)["sys"] == "up"                       # not the model's 'absent'
+    assert stored(sub)["sys"] == "absent"                   # kept, not judged
     assert scenario_kept(sub) and "scenario released" not in out
+    # the release look read 'up' into a copy: what the run hands its run_end hooks is the kept value
+    assert json.loads((sub.root / "state-at-run-end").read_text())["sys"] == "absent"
 
 
 def test_a_failed_step_that_changed_nothing_still_releases(sub, capsys):

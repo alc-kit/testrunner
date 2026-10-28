@@ -1,9 +1,10 @@
 """Validators confirm every claimed state change (WP testrunner-state-validation §3.2–§3.3,
 user 2026-10-27): a claim is committed only when its validator HOLDS; a claim that does not hold,
-or a validator that cannot tell, fails the step; after any step that claims nothing (or whose
+or a validator that cannot tell, fails the step; after a step that claims nothing (or whose
 claim did not hold) the value before and every declared target are asked, and exactly one may
-hold, otherwise the variable is UNKNOWN and the step fails with the whole story. Each rule has its
-negative control."""
+hold, otherwise the variable is UNKNOWN and the step fails with the whole story. A step the ACTION
+ends failed, errored or aborted is NOT JUDGED (user 2026-10-28, §8.7.8): no validator is asked, and
+the value from before is kept. Each rule has its negative control."""
 import json
 
 import pytest
@@ -138,32 +139,52 @@ def test_control_without_a_validator_that_looks_a_passed_claim_is_accepted(sub, 
 
 # ── after a failure, nothing is assumed ─────────────────────────────────────
 
-def test_a_failed_step_that_reached_the_target_is_recorded(sub, capsys):
-    s = make_sub(sub)
-    s.write("make-fails", "1")                          # builds the system, then fails
-    code, out, ev, state = run(s, capsys, "make")
-    assert code == 1 and state["sys"] == "up"
-    ch = events(ev, "state_changed")
-    assert ch and ch[0]["note"] == "reached although the step ended failed"
-    assert "scenario released" not in out
-
-
-def test_a_failed_step_with_outcome_validators_changed_nothing_and_says_so(sub, capsys):
-    # today's implicit rule, now declared: a failed step left the value before
-    s = make_sub(sub, absent="{outcome: true}", up="{outcome: true}")
+def test_a_failed_step_is_not_judged_and_keeps_the_value_from_before(sub, capsys):
+    # make builds the system, then fails: NOT judged (user 2026-10-28) — the value from before
+    # stays, no validator is asked, and the release (decided on what IS) still keeps the scenario
+    s = make_sub(sub, absent="{python: sys-is}", up="{python: sys-is}")
     s.write("make-fails", "1")
     code, out, ev, state = run(s, capsys, "make")
     assert code == 1 and state["sys"] == "absent"
-    chk = events(ev, "state_checked")
-    assert chk and chk[0]["value"] == "absent" and {v["answer"] for v in chk[0]["verdicts"]} == {HOLDS, DOES_NOT_HOLD}
+    kept = events(ev, "state_kept")
+    assert kept and kept[0]["var"] == "sys" and kept[0]["value"] == "absent" and kept[0]["outcome"] == "failed"
+    assert not events(ev, "state_changed") and not events(ev, "state_checked") and not events(ev, "state_unknown")
+    assert "scenario released" not in out                # the system IS up: the release look sees it
 
 
-def test_const_cannot_tell_the_value_before_from_the_one_after_a_failure(sub, capsys):
+def test_an_errored_step_is_not_judged_either(sub, capsys):
+    # errored (here: the action returns an outcome it does not declare) is a failure like failed
+    mod = MOD.replace("""    if knob("make-fails"):
+        raise RuntimeError("make failed")""", """    if knob("make-fails"):
+        raise RuntimeError("make failed")
+    if knob("make-strays"):
+        from testrunner import Outcome
+        return Outcome("sideways", "an outcome make does not declare")""")
+    s = make_sub(sub, absent="{python: sys-is}", up="{python: sys-is}", mod=mod)
+    s.write("make-strays", "1")
+    code, out, ev, state = run(s, capsys, "make")
+    assert code == 1 and state["sys"] == "absent"
+    kept = events(ev, "state_kept")
+    assert kept and kept[0]["outcome"] == "errored" and not events(ev, "state_changed")
+
+
+def test_control_a_passed_step_is_still_judged(sub, capsys):
+    # negative control for the rule above: the same step PASSING is settled by its validator
+    s = make_sub(sub, absent="{python: sys-is}", up="{python: sys-is}")
+    code, out, ev, state = run(s, capsys, "make")
+    assert code == 0 and state["sys"] == "up"
+    ch = events(ev, "state_changed")
+    assert ch and ch[0]["confirmed_by"]["kind"] == "python" and not events(ev, "state_kept")
+
+
+def test_a_failure_asks_no_validator_even_one_that_would_hold(sub, capsys):
+    # const holds for any value: if a failure were judged, both values would hold at once (the
+    # old "2 values hold" unknown). Not judged, it simply keeps the value from before.
     s = make_sub(sub, absent="{const: true}", up="{const: true}")
     s.write("make-fails", "1")
     code, out, ev, state = run(s, capsys, "make")
-    assert code == 1 and state["sys"] is None
-    assert "2 values hold at once (absent, up)" in events(ev, "state_unknown")[0]["why"]
+    assert code == 1 and state["sys"] == "absent"
+    assert not events(ev, "state_unknown") and events(ev, "state_kept")
 
 
 def test_control_const_confirms_a_passed_claim(sub, capsys):
@@ -185,7 +206,7 @@ def test_a_python_validator_gets_the_claim_and_fixtures(sub, capsys):
 
 
 def test_an_outcome_validator_can_name_a_walks_inner_steps(sub, capsys):
-    # the golden-image case: "the build and the fetch did not fail", whatever came after
+    # the golden-image case: "the build and the fetch did not fail" confirms a PASSED walk's claim
     sub.write("testrunner.yml", """
 action_files: [walks.yml]
 states:
@@ -208,20 +229,20 @@ actions:
       - {id: tidy, run: "test ! -f tidy-fails"}
 """)
     sub.write("configs/default.yml", "params: {}\n")
-    sub.write("tidy-fails", "")                         # compile + fetch passed, the walk failed after
     code, out, ev, state = run(sub, capsys, "build")
-    assert code == 1 and state["sys"] == "up", out
-    assert events(ev, "state_changed")[0]["note"] == "reached although the step ended failed"
+    assert code == 0 and state["sys"] == "up", out
+    assert events(ev, "state_changed")[0]["confirmed_by"]["kind"] == "outcome"
     (sub.root / "state" / "state.json").unlink()
-    (sub.root / "tidy-fails").unlink()
-    sub.write("fetch-fails", "")                        # negative control: fetch failed
-    code, out, ev, state = run(sub, capsys, "build")
+    sub.write("tidy-fails", "")                         # compile + fetch passed, the walk failed after:
+    code, out, ev, state = run(sub, capsys, "build")    # a failed walk is not judged (user 2026-10-28)
     assert code == 1 and state["sys"] == "absent"
+    assert events(ev, "state_kept")[-1]["outcome"] == "failed"
 
 
-def test_validators_that_contradict_each_other_leave_the_value_unknown(sub, capsys):
+def test_validators_that_would_contradict_each_other_are_not_asked_after_a_failure(sub, capsys):
     # absent's validator says "a failed step changed nothing", up's says "compile and fetch
-    # passed": after a later failure both hold — the machine is undefined, so the value is unknown
+    # passed": after a later failure both would hold (the machine is undefined there). A failure
+    # is not judged, so neither is asked, and the value from before is kept.
     sub.write("testrunner.yml", """
 action_files: [walks.yml]
 states:
@@ -245,8 +266,8 @@ actions:
 """)
     sub.write("configs/default.yml", "params: {}\n")
     code, out, ev, state = run(sub, capsys, "build")
-    assert code == 1 and state["sys"] is None
-    assert "2 values hold at once (absent, up)" in events(ev, "state_unknown")[0]["why"]
+    assert code == 1 and state["sys"] == "absent"
+    assert not events(ev, "state_unknown") and events(ev, "state_kept")
 
 
 def test_an_outcome_validator_naming_inner_steps_of_a_non_walk_is_refused(sub, capsys):
