@@ -847,7 +847,15 @@ there also loads the inner-step kinds and resolvers it registers for walk action
 - the generated `ansible.cfg` and harness key;
 - scope guards: only nodes that EXIST, and never an empty scope;
 - the `rig` observer, the purge of stale per-node state, drive rules for the playbooks' prompts,
-  the console capture and the sweep for leftover libvirt domains.
+  the console capture and the sweep for leftover libvirt domains;
+- the generic **regions**, as validators read once per look (`ext/rig/regions.py`):
+  - `{python: vms}`: `absent`, `running`, `halted` or `partial`. It is judged against the
+    declared data `expected` when there is any, else the catalogue's cluster nodes. `running`
+    means every expected machine runs **and** answers TCP/22; it never pings.
+  - `{python: support}`: `absent` or `up`, for the scenario's other machines.
+
+  What runs *on* the machines is a system under test, and its probes live with it, e.g. Proxmox
+  VE's in [proxmox-testrunner-ext](https://github.com/alc-kit/proxmox-testrunner-ext).
 
 A rig describes itself in data:
 ```yaml
