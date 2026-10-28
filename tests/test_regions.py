@@ -96,8 +96,23 @@ def test_answers_really_connects():
     assert asyncio.run(go()) == (True, False)
 
 
-def test_the_validators_are_registered_through_the_rig_extension():
-    from testrunner.ext.rig import kinds
-    from testrunner.api import MARK
-    assert getattr(kinds.vms, MARK).name == "vms" and getattr(kinds.support, MARK).name == "support"
-    assert getattr(kinds.machines_reading, MARK).scope == "look"
+def test_a_subscriber_that_imports_the_regions_has_them_registered(sub):
+    # what the runner REALLY registers (the first version of this test only checked the marks on
+    # the functions, and so could not see that ext.rig's kinds module never registers validators)
+    from testrunner.config import load_runner_config
+    from testrunner.discovery import collect
+    sub.write("testrunner.yml", "modules: [m.py]\n")
+    sub.write("m.py", "from testrunner.ext.rig.regions import machines_reading, support, vms  # noqa: F401\n")
+    reg = collect(load_runner_config(sub.root / "testrunner.yml"))
+    assert {"vms", "support"} <= set(reg.validators)
+    assert reg.fixtures["machines_reading"].scope == "look"
+
+
+def test_control_an_extension_alone_registers_no_region_validator(sub):
+    # `ext: {rig: ...}` without the import: nothing — the subscriber opts in, explicitly
+    from testrunner.config import load_runner_config
+    from testrunner.discovery import collect
+    sub.write("testrunner.yml", "modules: [m.py]\n")
+    sub.write("m.py", "\n")
+    reg = collect(load_runner_config(sub.root / "testrunner.yml"))
+    assert "vms" not in reg.validators and "machines_reading" not in reg.fixtures

@@ -24,6 +24,13 @@ Two validators and the one reading they share (a `look` fixture: one reading per
 Declare them as `validate: {python: vms}` / `{python: support}` on a variable whose values are
 exactly those names, and `observe: {order: [...]}` to read the variable from them.
 
+**A rig opts in by importing them** in one of its own modules (the runner collects a subscriber's
+modules; an extension contributes only step kinds, resolvers and validator kinds — its validators
+and fixtures stay the subscriber's call, testrunner discovery):
+
+    # actions/regions.py
+    from testrunner.ext.rig.regions import machines_reading, support, vms  # noqa: F401
+
 Not here (rig-specific, so the rig adds it): leftover networks and volumes after a destroy that
 failed half-way (§8.6 case 4) — testrunner does not know a rig's network names.
 """
