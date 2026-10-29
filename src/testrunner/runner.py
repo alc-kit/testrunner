@@ -979,8 +979,20 @@ class Runner:
                 continue
             claimed_here = any(t.by == claimer(act) for t in self.rc.states[var].transitions)
             walks = [f.walk.name for f in self._frames if f.walk is not None]
+            if outcome.name in FAILURES and any(t.by in walks for t in self.rc.states[var].transitions):
+                # a failed inner step ends its walk failed, and the walk's failure line (the
+                # expected end result) judges this variable: the reading is the walk's to judge,
+                # never applied here
+                run.state[var] = was
+                log.info("%s: ended %s and observed %s=%r (the model says %r): left to the enclosing walk's "
+                         "failure line", sid, outcome.name, var, seen, was)
+                continue
+            # only a PASSED inner step can show its walk's claim early, and only the walk's line for
+            # passed covers it: after a failed inner step the walk ends failed, and its failure line
+            # (the expected end result) is what is judged (run 10c2e15d, 2026-10-29)
             covering = [t for t in self.rc.states[var].transitions
-                        if t.by in walks and t.frm in (was, ANY) and t.to == seen]
+                        if outcome.name == PASSED and t.on == PASSED
+                        and t.by in walks and t.frm in (was, ANY) and t.to == seen]
             if covering and var not in looked:
                 # an inner step made a change its enclosing walk declares: the walk's claim, seen early
                 t = covering[0]

@@ -353,9 +353,12 @@ prints the whole of it as a table, which also goes in the journal and both repor
     the variable is **unknown**;
   - otherwise the observer is the only one that looked, so its reading stands: the step's claim
     did not hold, or the step changed the variable without declaring it;
-  - inside a walk, an observed change that the enclosing walk declares (from the value the
-    variable had, to the value now seen) is that walk's claim, seen early. It is recorded, not
-    failed;
+  - inside a walk, after an inner step that PASSED, an observed change that the enclosing walk
+    declares for `passed` (from the value the variable had, to the value now seen) is that walk's
+    claim, seen early. It is recorded, not failed;
+  - inside a walk, after an inner step that failed, errored or was aborted, a variable the
+    enclosing walk declares is left as it was: the walk ends failed, and its failure line (the
+    expected end result) judges it. The reading is never applied by the inner step;
   - a value the model does not know (unknown) is learned from the observer, but only when the
     observer READ a value. An observer that cannot tell which value it is returns `CANNOT_TELL`,
     and the variable stays unknown. It must never answer a guess, such as a lower bound: a guess
