@@ -105,7 +105,9 @@ def _claim(root, n, q):
 
 
 def test_parallel_claims_have_exactly_one_winner(tmp_path):
-    ctx = multiprocessing.get_context("fork")
+    # spawn, never fork: forking a multi-threaded process may deadlock the child (an xdist
+    # worker has threads; python 3.14 warns), and 12 independently started claimers race as well
+    ctx = multiprocessing.get_context("spawn")
     q = ctx.Queue()
     procs = [ctx.Process(target=_claim, args=(tmp_path, n, q)) for n in range(12)]
     for p in procs:

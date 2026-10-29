@@ -16,11 +16,13 @@ jobs:
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install pyyaml==6.0.3 pytest==9.1.1
+      - run: pip install pyyaml==6.0.3 pytest==9.1.1 pytest-xdist==3.8.0
       # the Vagrant layer's tests load Vagrantfiles with ruby; a runner without one must FAIL
       # here, never skip them silently
       - run: ruby --version
-      - run: python -m pytest -q tests
+      # in parallel (pytest-xdist; measured 2026-10-29: 37 s serial, 11-15 s with -n auto, the same
+      # 678 tests); every test must therefore be safe beside the others
+      - run: python -m pytest -q -n auto tests
   content-guard:
     runs-on: ubuntu-latest
     steps:
