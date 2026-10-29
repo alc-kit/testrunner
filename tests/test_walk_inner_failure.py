@@ -92,3 +92,23 @@ def test_control_a_passed_inner_step_is_the_walks_claim_seen_early(sub, capsys):
     assert early and early[0]["note"] == "observed inside the walk bring, which declares it"
     assert stored(s)["sys"] == "up" and (s.root / "after").exists()
     assert not ev(s, "observed_after_failure")
+
+
+BROKEN_RUNNER = RUNNER.replace("values: [absent, up]", "values: [absent, up, broken]") \
+    .replace("observe: {order: [up, absent]}", "observe: {order: [up, broken, absent]}") \
+    .replace("      absent --> absent : bring [failed]\n", "      absent --> broken : bring [failed]\n")
+
+
+def test_a_passed_inner_step_never_shows_the_walks_failure_line_early(sub, capsys):
+    # the walk declares `absent --> broken` for FAILED; an inner step that PASSED and left broken
+    # is not that line seen early (the walk has not failed): it is an undeclared change, and fails
+    s = make_sub(sub, exit_code=0)
+    s.write("testrunner.yml", BROKEN_RUNNER)
+    walks = WALKS.replace("    steps:\n", "    produces_on: {failed: {sys: {absent: broken}}}\n    steps:\n")
+    s.write("walks.yml", walks.replace("@ROOT@", str(s.root)).replace("echo up", "echo broken")
+            .replace("@EXIT@", "exit 0"))
+    code, out = s.run(capsys=capsys)
+    assert code == 1, out
+    assert not [e for e in ev(s, "state_changed") if "inside the walk" in str(e.get("note"))]
+    assert "changed sys without declaring it" in out
+    assert not (s.root / "after").exists()
